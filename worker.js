@@ -66,14 +66,28 @@ async function getToken(env) {
     client_secret: env.OPENSKY_CLIENT_SECRET
   });
 
-  const res = await fetch(TOKEN_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body
-  });
-  if (!res.ok) {
+  // The OpenSky auth host intermittently fails to answer from Cloudflare's
+  // network, which surfaces as a 522. One retry clears most of these.
+  let res = null, lastErr = '';
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      res = await fetch(TOKEN_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body,
+        signal: AbortSignal.timeout(12000)
+      });
+      if (res.ok) break;
+      lastErr = 'HTTP ' + res.status;
+      res = null;
+    } catch (e) {
+      lastErr = e.name === 'TimeoutError' ? 'timed out after 12 s' : e.message;
+      res = null;
+    }
+  }
+  if (!res) {
     cachedToken = null;
-    throw new Error('Token exchange failed: HTTP ' + res.status);
+    throw new Error('Token exchange failed: ' + lastErr);
   }
   const json = await res.json();
   cachedToken = json.access_token;
@@ -89,7 +103,24 @@ export default {
 
     const target = new URL(request.url).searchParams.get('url');
     if (!target) {
-      return reject('Missing ?url= parameter.', 400, env, request);
+      // A bare GET is a health probe: report configuration without exposing secrets.
+      let tokenState;
+      try {
+        const t = await getToken(env);
+        tokenState = t ? 'ok — token obtained' : 'no credentials bound';
+      } catch (e) {
+        tokenState = 'FAILED — ' + e.message;
+      }
+      return new Response(JSON.stringify({
+        relay: 'opensky-cors-relay',
+        version: '1.1.0',
+        allowedOrigin: env.ALLOWED_ORIGIN || '(any)',
+        credentialsBound: !!(env.OPENSKY_CLIENT_ID && env.OPENSKY_CLIENT_SECRET),
+        tokenExchange: tokenState,
+        usage: 'append ?url=<encoded OpenSky URL>'
+      }, null, 2), {
+        headers: { 'Content-Type': 'application/json', ...corsHeaders(env, request) }
+      });
     }
 
     let upstream;
@@ -108,7 +139,8 @@ export default {
     // credentials that is redundant, so short-circuit it.
     if (upstream.hostname === 'auth.opensky-network.org' && env.OPENSKY_CLIENT_SECRET) {
       return new Response(
-        JSON.stringify({ access_token: 'relay-managed', expires_in: 1800, note: 'Relay authenticates upstream.' }),
+        JSON.stringify({ access_token: 'relay-managed', expires_in: 1800, relay_managed: true,
+                         note: 'This relay authenticates upstream; the browser does not need a token.' }),
         { headers: { 'Content-Type': 'application/json', ...corsHeaders(env, request) } }
       );
     }
@@ -117,11 +149,17 @@ export default {
     headers.set('Accept', 'application/json');
     headers.set('User-Agent', 'traffic-monitor-relay/1.0');
 
+    // Authentication is an optimisation, not a prerequisite. If the token
+    // exchange fails the request still goes through anonymously — degraded
+    // rate limits beat no data at all.
+    let authMode = 'anonymous';
+    let authNote = '';
     try {
       const token = await getToken(env);
-      if (token) headers.set('Authorization', 'Bearer ' + token);
+      if (token) { headers.set('Authorization', 'Bearer ' + token); authMode = 'bearer'; }
+      else authNote = 'no credentials bound to this relay';
     } catch (e) {
-      return reject(e.message, 502, env, request);
+      authNote = e.message;
     }
 
     // Pass through a browser-supplied bearer token only when the relay has none.
@@ -149,10 +187,12 @@ export default {
 
     const out = new Headers(corsHeaders(env, request));
     out.set('Content-Type', res.headers.get('Content-Type') || 'application/json');
+    out.set('X-Relay-Auth', authMode);
+    if (authNote) out.set('X-Relay-Auth-Note', authNote.slice(0, 200));
+    out.set('Access-Control-Expose-Headers', 'X-Rate-Limit-Remaining, X-Relay-Auth, X-Relay-Auth-Note');
     const remaining = res.headers.get('X-Rate-Limit-Remaining');
     if (remaining) {
       out.set('X-Rate-Limit-Remaining', remaining);
-      out.set('Access-Control-Expose-Headers', 'X-Rate-Limit-Remaining');
     }
     const retryAfter = res.headers.get('Retry-After');
     if (retryAfter) out.set('Retry-After', retryAfter);

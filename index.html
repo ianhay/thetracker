@@ -565,7 +565,7 @@ html[data-theme="light"] .veh .body{stroke:rgba(255,255,255,.9);}
    ------------------------------------------------------------------------- */
 /* Build identity. Bump APP_VERSION on every deploy so the running page can be
    distinguished from a cached one. */
-const APP_VERSION = '1.4.0';
+const APP_VERSION = '1.5.0';
 const APP_BUILD   = '2026-08-01';
 
 const $  = (s, r = document) => r.querySelector(s);
@@ -920,7 +920,8 @@ const OpenSky = (() => {
       }
       if (!res.ok) {
         Log.add('air', 'HTTP ' + res.status + ' ' + res.statusText +
-          (res.status === 401 || res.status === 403 ? ' — credentials rejected or anonymous access refused.' : ''));
+          (res.status === 401 || res.status === 403 ? ' — credentials rejected or anonymous access refused.' : '') +
+          (res.status === 502 ? ' — this came from the relay, not OpenSky. Redeploy worker.js: from v1.1.0 a failed token exchange no longer aborts the request.' : ''));
         throw new Error('HTTP ' + res.status);
       }
       const payload = await res.json();
@@ -930,6 +931,12 @@ const OpenSky = (() => {
                      (S.osBbox ? ' · bbox' : ' · global'));
       if (!kept) Log.add('air', 'Zero aircraft in this view. Zoom out or pan to a busier region before concluding the feed is broken.');
       backoff = 1;
+      const relayAuth = res.headers.get('X-Relay-Auth');
+      const relayNote = res.headers.get('X-Relay-Auth-Note');
+      if (relayAuth) {
+        auth = relayAuth === 'bearer';
+        if (relayNote) Log.add('air', 'Relay is running ' + relayAuth + ': ' + relayNote);
+      }
       const rem = res.headers.get('X-Rate-Limit-Remaining');
       setStatus('#st-air', 'ok', 'AIR ' + kept + (auth ? ' relay' : ' anon') + (rem ? ' · ' + rem + ' cr' : ''));
       Dash.refresh();
@@ -1010,12 +1017,12 @@ const AIS = (() => {
           toast('Marine feed silent', 'Connected, but no vessels in this bounding box after 25 seconds. See Diagnostics.', 'warn');
         }
       }, 25000);
+      // FilterMessageTypes is omitted entirely. An empty array reads as an
+      // empty allowlist — subscribe to nothing — which is exactly the silent
+      // zero-message behaviour observed. Omitting the key means "send everything".
       ws.send(JSON.stringify({
         APIKey: S.aisKey,
-        BoundingBoxes: bbox(),
-        // No FilterMessageTypes: an unrecognised entry silently suppresses the
-        // whole stream, which is indistinguishable from "no traffic in the box".
-        FilterMessageTypes: []
+        BoundingBoxes: bbox()
       }));
       setStatus('#st-sea', 'ok', 'SEA live');
     };
@@ -1625,6 +1632,22 @@ async function runDiagnostics() {
 
   // Step 1b — the relay, if one is configured.
   if (S.osProxy) {
+    // The bare relay URL returns a configuration report.
+    try {
+      const base = S.osProxy.replace(/\/?\?url=$/, '/');
+      const r = await fetch(base, { cache: 'no-store' });
+      const j = await r.json();
+      Log.add('diag', 'STEP 1a relay health: version ' + (j.version || '?') +
+        ' · allowed origin ' + j.allowedOrigin +
+        ' · credentials bound: ' + j.credentialsBound +
+        ' · token exchange: ' + j.tokenExchange);
+      if (String(j.tokenExchange).indexOf('FAILED') === 0) {
+        Log.add('diag', 'The relay cannot reach the OpenSky auth server. From relay v1.1.0 onwards this is survivable — ' +
+                        'requests fall through anonymously instead of returning 502. If you are seeing 502s, redeploy worker.js.');
+      }
+    } catch (e) {
+      Log.add('diag', 'STEP 1a relay health: no response (' + e.message + '). If this reports "Missing ?url=", the relay is running an older worker.js — redeploy it.');
+    }
     try {
       const target = 'https://opensky-network.org/api/states/all?lamin=45.8&lomin=5.9&lamax=47.8&lomax=10.5';
       const r = await fetch(S.osProxy + encodeURIComponent(target), { cache: 'no-store' });
@@ -1654,8 +1677,11 @@ async function runDiagnostics() {
       const r = await fetch(S.osProxy ? S.osProxy + encodeURIComponent(u) : u, {
         method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body
       });
+      let j = null; try { j = await r.json(); } catch (e) {}
       Log.add('diag', 'STEP 2 OAuth2 token exchange: HTTP ' + r.status +
-        (r.ok ? ' — token issued.' : ' — check the client ID and secret on your OpenSky account page.'));
+        (j && j.relay_managed
+          ? ' — answered by the relay stub, not by OpenSky. The relay holds the credentials, so this step proves nothing. Check the relay health probe instead.'
+          : (r.ok ? ' — token issued by OpenSky.' : ' — check the client ID and secret on your OpenSky account page.')));
     } catch (e) {
       Log.add('diag', 'STEP 2 OAuth2 token exchange: FAILED (' + e.message + '). ' +
         (e instanceof TypeError ? 'The Keycloak token endpoint refused the browser origin. Set a CORS proxy prefix, or run anonymously.' : ''));
