@@ -781,9 +781,12 @@ function pruneStale() {
 const OpenSky = (() => {
   const TOKEN_URL = 'https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token';
   const API_URL   = 'https://opensky-network.org/api/states/all';
-  let token = null, tokenExp = 0, timer = null, backoff = 1, inflight = false;
+  let token = null, tokenExp = 0, timer = null, backoff = 1, inflight = false, lastAttempt = 0;
 
   const px = (u) => S.osProxy ? S.osProxy + encodeURIComponent(u) : u;
+  // A relay that holds the OpenSky credentials itself authenticates upstream,
+  // so the browser must not (and need not) hold a client secret at all.
+  const relayAuthenticates = () => !!S.osProxy && !S.osSecret;
 
   async function getToken() {
     if (!S.osId || !S.osSecret) return null;
@@ -847,13 +850,17 @@ const OpenSky = (() => {
     return kept;
   }
 
-  async function poll() {
+  async function poll(force) {
     if (inflight || !S.osEnabled) return;
+    // A failing request returns almost instantly, so map panning could otherwise
+    // fire several attempts per second and burn credits.
+    if (!force && Date.now() - lastAttempt < 5000) return;
+    lastAttempt = Date.now();
     inflight = true;
     setStatus('#st-air', 'warn', 'AIR polling');
     try {
       const headers = {};
-      let auth = false;
+      let auth = relayAuthenticates();
       if (S.osId && S.osSecret) {
         try { const t = await getToken(); if (t) { headers.Authorization = 'Bearer ' + t; auth = true; } }
         catch (e) {
@@ -884,7 +891,7 @@ const OpenSky = (() => {
       if (!kept) Log.add('air', 'Zero aircraft in this view. Zoom out or pan to a busier region before concluding the feed is broken.');
       backoff = 1;
       const rem = res.headers.get('X-Rate-Limit-Remaining');
-      setStatus('#st-air', 'ok', 'AIR ' + kept + (auth ? ' auth' : ' anon') + (rem ? ' · ' + rem + ' cr' : ''));
+      setStatus('#st-air', 'ok', 'AIR ' + kept + (auth ? ' relay' : ' anon') + (rem ? ' · ' + rem + ' cr' : ''));
       Dash.refresh();
     } catch (e) {
       setStatus('#st-air', 'err', 'AIR error');
@@ -907,7 +914,7 @@ const OpenSky = (() => {
     clearTimeout(timer);
     if (S.osEnabled) timer = setTimeout(poll, interval() * 1000);
   }
-  function start() { clearTimeout(timer); if (S.osEnabled) poll(); else setStatus('#st-air', 'idle', 'AIR off'); }
+  function start() { clearTimeout(timer); if (S.osEnabled) poll(true); else setStatus('#st-air', 'idle', 'AIR off'); }
   function stop()  { clearTimeout(timer); setStatus('#st-air', 'idle', 'AIR off'); }
   function reset() { backoff = 1; token = null; tokenExp = 0; start(); }
   return { start, stop, poll, reset };
@@ -955,7 +962,10 @@ const AIS = (() => {
       clearTimeout(silenceTimer);
       silenceTimer = setTimeout(() => {
         if (!posCount) {
-          Log.add('sea', 'No position reports after 25 s. The key was accepted but the bounding box has no AIS coverage, or the key is not yet active. Try switching the viewport subscription off (global) and re-subscribing.');
+          Log.add('sea', 'No position reports after 25 s. Total messages of any type received: ' + msgCount + '. ' +
+            (msgCount === 0
+              ? 'Zero messages at all — the subscription was accepted but matched nothing. Untick "Subscribe to the current map view" and press Re-subscribe to test globally; if that also returns nothing, the key is not active yet.'
+              : 'Non-position messages are arriving, so the key works — this bounding box simply has no vessels reporting.'));
           setStatus('#st-sea', 'warn', 'SEA no traffic');
           toast('Marine feed silent', 'Connected, but no vessels in this bounding box after 25 seconds. See Diagnostics.', 'warn');
         }
@@ -963,14 +973,18 @@ const AIS = (() => {
       ws.send(JSON.stringify({
         APIKey: S.aisKey,
         BoundingBoxes: bbox(),
-        FilterMessageTypes: ['PositionReport', 'ShipStaticData', 'StandardClassBPositionReport']
+        // No FilterMessageTypes: an unrecognised entry silently suppresses the
+        // whole stream, which is indistinguishable from "no traffic in the box".
+        FilterMessageTypes: []
       }));
       setStatus('#st-sea', 'ok', 'SEA live');
     };
 
     ws.onmessage = (ev) => {
       let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
-      if (msgCount === 0) Log.add('sea', 'First message received (' + (m.MessageType || 'unknown type') + '). Stream is alive.');
+      if (msgCount === 0) {
+        Log.add('sea', 'First message received, type "' + (m.MessageType || 'unknown') + '". Stream is alive and the key is valid.');
+      }
       if (m.error || m.Error) {
         Log.add('sea', 'Stream rejected the subscription: ' + String(m.error || m.Error));
         setStatus('#st-sea', 'err', 'SEA rejected');
@@ -1564,6 +1578,26 @@ async function runDiagnostics() {
       (e instanceof TypeError
         ? 'This is a network or CORS block, not a data problem. The API returned no usable CORS header for this origin, or the request never left the browser (extension, ad blocker, or corporate filter). A proxy prefix is the fix.'
         : ''));
+  }
+
+  // Step 1b — the relay, if one is configured.
+  if (S.osProxy) {
+    try {
+      const target = 'https://opensky-network.org/api/states/all?lamin=45.8&lomin=5.9&lamax=47.8&lomax=10.5';
+      const r = await fetch(S.osProxy + encodeURIComponent(target), { cache: 'no-store' });
+      if (r.ok) {
+        const j = await r.json();
+        Log.add('diag', 'STEP 1b relay: OK, HTTP ' + r.status + ', ' + ((j.states || []).length) +
+          ' aircraft returned through ' + S.osProxy + '. The relay is working — the air feed should populate.');
+      } else {
+        Log.add('diag', 'STEP 1b relay: HTTP ' + r.status + ' ' + r.statusText +
+          '. The relay is reachable but rejected the request. Check the Worker allowlist and any credential bindings.');
+      }
+    } catch (e) {
+      Log.add('diag', 'STEP 1b relay: FAILED (' + e.message + '). The relay URL is wrong, not deployed, or missing CORS headers of its own.');
+    }
+  } else {
+    Log.add('diag', 'STEP 1b relay: none configured. Given the Step 1 result, a relay is required.');
   }
 
   // Step 2 — OAuth2 token exchange, only if credentials are present.
