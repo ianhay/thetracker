@@ -473,10 +473,18 @@ html[data-theme="light"] .veh .body{stroke:rgba(255,255,255,.9);}
         <input id="os-enabled" type="checkbox" checked>
         <label for="os-enabled">Air feed enabled</label>
       </div>
-      <div class="row">
-        <label for="os-proxy">CORS proxy prefix (optional)</label>
-        <input id="os-proxy" type="text" autocomplete="off" spellcheck="false" placeholder="https://your-worker.example.workers.dev/?url=">
-        <span class="hint">Only needed if the OAuth token endpoint blocks browser origins. Prefixed to the token and API URLs.</span>
+      <div class="row" style="border:1px solid var(--ih-accent);border-radius:var(--r);padding:12px;background:var(--ih-surface-alt);">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+          <label for="os-proxy" style="margin:0;">Relay URL (Cloudflare Worker) — required</label>
+          <span class="pill err" id="relay-state" style="margin-left:auto;"><span class="dot"></span><span class="lbl">not set</span></span>
+        </div>
+        <input id="os-proxy" type="text" autocomplete="off" spellcheck="false"
+               placeholder="https://hello-world.yourname.workers.dev">
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;">
+          <button class="btn accent" id="btn-relay-test">Test relay now</button>
+          <button class="btn" id="btn-relay-clear">Clear</button>
+        </div>
+        <span class="hint" id="relay-msg">Paste the Worker URL. The <code>/?url=</code> suffix is added automatically if you leave it off. Nothing else on this page will make the air feed work.</span>
       </div>
     </fieldset>
 
@@ -557,7 +565,7 @@ html[data-theme="light"] .veh .body{stroke:rgba(255,255,255,.9);}
    ------------------------------------------------------------------------- */
 /* Build identity. Bump APP_VERSION on every deploy so the running page can be
    distinguished from a cached one. */
-const APP_VERSION = '1.3.0';
+const APP_VERSION = '1.4.0';
 const APP_BUILD   = '2026-08-01';
 
 const $  = (s, r = document) => r.querySelector(s);
@@ -1549,7 +1557,7 @@ function bindSettings() {
   const map2 = [
     ['#os-id', 'osId', 'value'], ['#os-secret', 'osSecret', 'value'],
     ['#os-interval', 'osInterval', 'number'], ['#os-bbox', 'osBbox', 'checked'],
-    ['#os-enabled', 'osEnabled', 'checked'], ['#os-proxy', 'osProxy', 'value'],
+    ['#os-enabled', 'osEnabled', 'checked'],
     ['#ais-key', 'aisKey', 'value'], ['#ais-viewport', 'aisViewport', 'checked'],
     ['#ais-enabled', 'aisEnabled', 'checked'],
     ['#cap', 'cap', 'number'], ['#stale', 'stale', 'number'],
@@ -1584,6 +1592,7 @@ async function runDiagnostics() {
   Log.add('diag', '--- diagnostics start ---');
   Log.add('diag', 'Build: v' + APP_VERSION + ' (' + APP_BUILD + '). If this is not the version you just deployed, ' +
                   'you are on a cached copy — hard-refresh with Ctrl+F5, or Ctrl+Shift+R.');
+  Log.add('diag', 'Relay setting currently stored: ' + (S.osProxy ? S.osProxy : '(empty)'));
   Log.add('diag', 'Page origin: ' + location.origin + location.pathname);
   Log.add('diag', 'Protocol: ' + location.protocol + (location.protocol === 'https:' ? ' (ok)' : ' — mixed content will block https feeds'));
   Log.add('diag', 'Leaflet: ' + (typeof L !== 'undefined' ? 'loaded' : 'MISSING') +
@@ -1631,7 +1640,8 @@ async function runDiagnostics() {
       Log.add('diag', 'STEP 1b relay: FAILED (' + e.message + '). The relay URL is wrong, not deployed, or missing CORS headers of its own.');
     }
   } else {
-    Log.add('diag', 'STEP 1b relay: NONE CONFIGURED. This is the blocker. Until worker.js is deployed and its URL ' +
+    Log.add('diag', 'STEP 1b relay: NONE CONFIGURED. The "Relay URL" box in Settings is empty — stored value is ' +
+                    JSON.stringify(S.osProxy) + '. This is the blocker. Until worker.js is deployed and its URL ' +
                     'pasted into "CORS proxy prefix" (ending in ?url=), the air feed cannot work — credentials, ' +
                     'polling interval and bounding box are all irrelevant while the browser is blocked at the network layer.');
   }
@@ -1695,6 +1705,59 @@ function importCredentials(raw) {
   OpenSky.reset();
 }
 
+/* The relay URL is the single most failure-prone field on this page, so it
+   normalises input, saves on every keystroke rather than on blur, and reports
+   its own state without the user having to run diagnostics. */
+function normaliseRelay(raw) {
+  let v = String(raw || '').trim().replace(/\s+/g, '');
+  if (!v) return '';
+  if (!/^https?:\/\//i.test(v)) v = 'https://' + v;
+  if (v.indexOf('?url=') > -1) return v;          // already complete
+  v = v.replace(/[/?&]+$/, '');                   // strip trailing punctuation
+  return v + '/?url=';
+}
+
+function setRelayState(kind, label, msg) {
+  const pill = $('#relay-state');
+  pill.className = 'pill ' + kind;
+  $('.lbl', pill).textContent = label;
+  if (msg) {
+    const m = $('#relay-msg');
+    m.textContent = msg;
+    m.style.color = kind === 'ok' ? 'var(--ih-success-strong)'
+                  : kind === 'err' ? 'var(--ih-error-strong)' : 'var(--ih-text-secondary)';
+  }
+}
+
+async function testRelay() {
+  const btn = $('#btn-relay-test');
+  const v = normaliseRelay($('#os-proxy').value);
+  if (!v) { setRelayState('err', 'not set', 'Nothing entered. Deploy worker.js and paste its URL here.'); return; }
+  $('#os-proxy').value = v; S.osProxy = v; saveSettings();
+  btn.disabled = true; btn.textContent = 'Testing…';
+  setRelayState('warn', 'testing', 'Contacting the relay…');
+  const target = 'https://opensky-network.org/api/states/all?lamin=45.8&lomin=5.9&lamax=47.8&lomax=10.5';
+  try {
+    const r = await fetch(v + encodeURIComponent(target), { cache: 'no-store' });
+    const body = await r.text();
+    if (r.ok) {
+      let n = '?';
+      try { n = (JSON.parse(body).states || []).length; } catch (e) {}
+      setRelayState('ok', 'working', 'Relay OK — ' + n + ' aircraft returned over Switzerland. The air feed should populate within one polling cycle.');
+      Log.add('air', 'Relay test passed via ' + v + ' (' + n + ' aircraft).');
+      OpenSky.reset();
+    } else {
+      setRelayState('err', 'HTTP ' + r.status, 'The relay answered with HTTP ' + r.status + '. ' + body.slice(0, 180));
+      Log.add('air', 'Relay test failed: HTTP ' + r.status + ' — ' + body.slice(0, 180));
+    }
+  } catch (e) {
+    setRelayState('err', 'unreachable', 'Could not reach the relay (' + e.message + '). Check the URL is exactly the one Cloudflare shows on the Worker overview page, and that the Worker is deployed rather than only saved.');
+    Log.add('air', 'Relay test failed: ' + e.message);
+  } finally {
+    btn.disabled = false; btn.textContent = 'Test relay now';
+  }
+}
+
 function bindFilters() {
   let qTimer = null;
   $('#q').addEventListener('input', (e) => {
@@ -1741,6 +1804,21 @@ function bindChrome() {
   $('#btn-refresh').addEventListener('click', () => OpenSky.reset());
   $('#btn-diag').addEventListener('click', runDiagnostics);
   $('#btn-json-import').addEventListener('click', () => importCredentials($('#os-json').value));
+
+  const relayInput = $('#os-proxy');
+  relayInput.value = S.osProxy || '';
+  const relaySync = () => {
+    S.osProxy = normaliseRelay(relayInput.value); saveSettings();
+    setRelayState(S.osProxy ? 'warn' : 'err', S.osProxy ? 'saved, untested' : 'not set',
+      S.osProxy ? 'Stored as ' + S.osProxy + ' — press "Test relay now" to confirm it works.' : null);
+  };
+  relayInput.addEventListener('input', relaySync);
+  relayInput.addEventListener('blur', () => { relayInput.value = normaliseRelay(relayInput.value); relaySync(); });
+  $('#btn-relay-test').addEventListener('click', testRelay);
+  $('#btn-relay-clear').addEventListener('click', () => {
+    relayInput.value = ''; S.osProxy = ''; saveSettings();
+    setRelayState('err', 'not set', 'Cleared.');
+  });
   $('#os-file').addEventListener('change', (e) => {
     const f = e.target.files && e.target.files[0];
     if (!f) return;
@@ -1792,6 +1870,8 @@ function bindChrome() {
   setInterval(() => { const n = pruneStale(); if (n) { render(); Dash.refresh(); } }, 30000);
   setInterval(() => render(), 5000);
 
+  setRelayState(S.osProxy ? 'warn' : 'err', S.osProxy ? 'saved, untested' : 'not set',
+    S.osProxy ? 'Stored as ' + S.osProxy + ' — press "Test relay now" to confirm it works.' : null);
   if (S.osEnabled) OpenSky.start(); else setStatus('#st-air', 'idle', 'AIR off');
   if (S.aisEnabled) AIS.connect(); else setStatus('#st-sea', 'idle', 'SEA off');
   if (S.demo) Demo.start();
