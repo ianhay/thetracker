@@ -182,6 +182,13 @@ legend{font-family:var(--font-head);font-size:17px;font-weight:600;padding:0 6px
 .callout.warn{border-left-color:var(--ih-accent);}
 .callout strong{display:block;font-family:var(--font-head);font-size:15px;letter-spacing:.2px;margin-bottom:2px;}
 a{color:var(--ih-primary);}
+#diaglog{
+  margin:0;background:var(--ih-code-bg);color:var(--ih-code-text);
+  border:1px solid var(--ih-border);border-radius:var(--r);
+  padding:10px;font-family:var(--font-mono);font-size:12px;line-height:18px;
+  max-height:240px;overflow:auto;white-space:pre-wrap;word-break:break-word;
+}
+#diaglog:empty::before{content:"No entries yet.";color:#9AA6B4;}
 
 /* ---------- Map chrome ---------- */
 .leaflet-container{background:var(--ih-map-bg);font-family:var(--font-body);}
@@ -488,6 +495,17 @@ html[data-theme="light"] .veh .body{stroke:rgba(255,255,255,.9);}
       </div>
     </fieldset>
 
+    <fieldset>
+      <legend>Diagnostics</legend>
+      <p class="hint" style="margin:0 0 10px;">Runs a sequence of isolated requests and reports exactly which one fails. Start here when the map is empty.</p>
+      <div class="row" style="flex-direction:row;gap:8px;flex-wrap:wrap;">
+        <button class="btn primary" id="btn-diag">Run diagnostics</button>
+        <button class="btn" id="btn-diag-copy">Copy log</button>
+        <button class="btn" id="btn-diag-clear">Clear</button>
+      </div>
+      <pre id="diaglog" tabindex="0" aria-label="Diagnostic log"></pre>
+    </fieldset>
+
     <div class="callout">
       <strong>Data attribution</strong>
       Air traffic: OpenSky Network state vectors, CC BY-SA 4.0 for research/non-commercial use. Marine traffic: AISStream.io relay of terrestrial AIS receivers — coverage is coastal and incomplete. Basemaps © OpenStreetMap contributors, © CARTO, and Esri/Maxar as attributed on the map.
@@ -553,6 +571,26 @@ function toast(title, msg, kind) {
   $('#toasts').appendChild(el);
   setTimeout(() => { el.style.opacity = '0'; setTimeout(() => el.remove(), 400); }, 7000);
 }
+/* Diagnostic log — every feed event is recorded so failures are visible
+   without opening dev tools. */
+const Log = (() => {
+  const lines = [];
+  function add(kind, msg) {
+    const t = new Date().toLocaleTimeString('en-AU', { hour12: false });
+    lines.push({ t, kind, msg: String(msg) });
+    if (lines.length > 200) lines.shift();
+    paint();
+  }
+  function paint() {
+    const box = document.getElementById('diaglog');
+    if (!box) return;
+    box.textContent = lines.map(l => l.t + '  [' + l.kind.toUpperCase() + '] ' + l.msg).join('\n');
+    box.scrollTop = box.scrollHeight;
+  }
+  const text = () => lines.map(l => l.t + ' [' + l.kind + '] ' + l.msg).join('\n');
+  return { add, paint, text };
+})();
+
 function setStatus(id, kind, label) {
   const el = $(id);
   el.className = 'pill ' + kind;
@@ -819,6 +857,8 @@ const OpenSky = (() => {
       if (S.osId && S.osSecret) {
         try { const t = await getToken(); if (t) { headers.Authorization = 'Bearer ' + t; auth = true; } }
         catch (e) {
+          Log.add('air', 'OAuth2 token exchange failed: ' + e.message +
+            (e instanceof TypeError ? ' (network/CORS — the Keycloak token endpoint may not allow browser origins; use a proxy prefix)' : ''));
           toast('OpenSky auth failed', e.message + ' — continuing anonymously. If this is a CORS block, set a proxy prefix in Settings.', 'warn');
         }
       }
@@ -827,18 +867,34 @@ const OpenSky = (() => {
         backoff = clamp(backoff * 2, 2, 16);
         const ra = res.headers.get('Retry-After');
         setStatus('#st-air', 'err', 'AIR rate-limited');
+        Log.add('air', 'HTTP 429 rate limited. Anonymous credits are very small — authenticate or widen the interval.');
         toast('OpenSky rate limit', 'Backing off to ' + interval() + ' s' + (ra ? ' (Retry-After ' + ra + ' s)' : '') + '. Authenticate or widen the polling interval.', 'warn');
         return;
       }
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      const kept = ingest(await res.json());
+      if (!res.ok) {
+        Log.add('air', 'HTTP ' + res.status + ' ' + res.statusText +
+          (res.status === 401 || res.status === 403 ? ' — credentials rejected or anonymous access refused.' : ''));
+        throw new Error('HTTP ' + res.status);
+      }
+      const payload = await res.json();
+      const kept = ingest(payload);
+      Log.add('air', 'HTTP ' + res.status + ' · ' + ((payload.states || []).length) + ' state vectors returned, ' +
+                     kept + ' with valid positions · ' + (auth ? 'authenticated' : 'anonymous') +
+                     (S.osBbox ? ' · bbox' : ' · global'));
+      if (!kept) Log.add('air', 'Zero aircraft in this view. Zoom out or pan to a busier region before concluding the feed is broken.');
       backoff = 1;
       const rem = res.headers.get('X-Rate-Limit-Remaining');
       setStatus('#st-air', 'ok', 'AIR ' + kept + (auth ? ' auth' : ' anon') + (rem ? ' · ' + rem + ' cr' : ''));
       Dash.refresh();
     } catch (e) {
       setStatus('#st-air', 'err', 'AIR error');
-      toast('Air feed error', e.message + '. Check network access, or that opensky-network.org is reachable from this origin.', 'err');
+      const cors = (e instanceof TypeError);
+      Log.add('air', (cors ? 'NETWORK/CORS FAILURE — the browser blocked or could not reach the request. '
+                           : 'Request failed: ') + e.message);
+      toast('Air feed error',
+        cors ? 'The browser could not complete the request to opensky-network.org. This is almost always CORS or a blocked origin — see Diagnostics in Settings.'
+             : e.message,
+        'err');
       backoff = clamp(backoff * 2, 1, 16);
     } finally {
       inflight = false;
@@ -865,6 +921,7 @@ const OpenSky = (() => {
 const AIS = (() => {
   const URL = 'wss://stream.aisstream.io/v0/stream';
   let ws = null, retry = 0, retryTimer = null, msgCount = 0, manualStop = false;
+  let silenceTimer = null, posCount = 0;
 
   function bbox() {
     if (!S.aisViewport) return [[[-90, -180], [90, 180]]];
@@ -877,6 +934,7 @@ const AIS = (() => {
     if (!S.aisEnabled) { setStatus('#st-sea', 'idle', 'SEA off'); return; }
     if (!S.aisKey) {
       setStatus('#st-sea', 'warn', 'SEA no key');
+      Log.add('sea', 'No API key set. AISStream has no anonymous mode.');
       toast('AIS key required', 'Add a free aisstream.io API key in Settings to receive live marine data.', 'warn');
       return;
     }
@@ -888,7 +946,20 @@ const AIS = (() => {
     }
 
     ws.onopen = () => {
-      retry = 0; msgCount = 0;
+      retry = 0; msgCount = 0; posCount = 0;
+      const bb = bbox();
+      Log.add('sea', 'Socket open. Subscribing with bounding box ' +
+        'SW ' + bb[0][0][0].toFixed(3) + ',' + bb[0][0][1].toFixed(3) +
+        ' → NE ' + bb[0][1][0].toFixed(3) + ',' + bb[0][1][1].toFixed(3) +
+        (S.aisViewport ? ' (current view)' : ' (global)'));
+      clearTimeout(silenceTimer);
+      silenceTimer = setTimeout(() => {
+        if (!posCount) {
+          Log.add('sea', 'No position reports after 25 s. The key was accepted but the bounding box has no AIS coverage, or the key is not yet active. Try switching the viewport subscription off (global) and re-subscribing.');
+          setStatus('#st-sea', 'warn', 'SEA no traffic');
+          toast('Marine feed silent', 'Connected, but no vessels in this bounding box after 25 seconds. See Diagnostics.', 'warn');
+        }
+      }, 25000);
       ws.send(JSON.stringify({
         APIKey: S.aisKey,
         BoundingBoxes: bbox(),
@@ -899,11 +970,14 @@ const AIS = (() => {
 
     ws.onmessage = (ev) => {
       let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
+      if (msgCount === 0) Log.add('sea', 'First message received (' + (m.MessageType || 'unknown type') + '). Stream is alive.');
       if (m.error || m.Error) {
+        Log.add('sea', 'Stream rejected the subscription: ' + String(m.error || m.Error));
         setStatus('#st-sea', 'err', 'SEA rejected');
         toast('AIS stream error', String(m.error || m.Error), 'err');
         manualStop = true; return;
       }
+      if (m.MessageType && m.MessageType.indexOf('PositionReport') > -1) posCount++;
       handle(m);
       if (++msgCount % 25 === 0) {
         setStatus('#st-sea', 'ok', 'SEA ' + countSea() + ' vessels');
@@ -911,8 +985,14 @@ const AIS = (() => {
       }
     };
 
-    ws.onerror = () => setStatus('#st-sea', 'err', 'SEA socket error');
-    ws.onclose = () => {
+    ws.onerror = () => {
+      setStatus('#st-sea', 'err', 'SEA socket error');
+      Log.add('sea', 'WebSocket error. If this fires immediately, the key is malformed or the origin is blocked.');
+    };
+    ws.onclose = (ev) => {
+      clearTimeout(silenceTimer);
+      Log.add('sea', 'Socket closed (code ' + ev.code + (ev.reason ? ', ' + ev.reason : '') + ').' +
+        (ev.code === 1006 && !msgCount ? ' Closed before any message — usually a rejected API key.' : ''));
       if (manualStop || !S.aisEnabled) { setStatus('#st-sea', 'idle', 'SEA off'); return; }
       retry = clamp(retry + 1, 1, 6);
       const wait = Math.pow(2, retry);
@@ -1438,11 +1518,80 @@ function bindSettings() {
       if (key === 'osEnabled') S.osEnabled ? OpenSky.reset() : OpenSky.stop();
       if (['osId', 'osSecret', 'osInterval', 'osBbox', 'osProxy'].indexOf(key) > -1) OpenSky.reset();
       if (key === 'aisEnabled') S.aisEnabled ? AIS.connect() : AIS.disconnect();
-      if (key === 'aisKey' && S.aisEnabled) AIS.connect();
+      if (key === 'aisKey' && S.aisKey) {
+        // Entering a key implies intent to use the feed. Previously the key was
+        // stored but nothing connected unless the enable box was also ticked.
+        S.aisEnabled = true; $('#ais-enabled').checked = true; saveSettings();
+        AIS.connect();
+      }
       if (key === 'demo') S.demo ? Demo.start() : Demo.stop();
       if (key === 'cap' || key === 'trail') render();
     });
   });
+}
+
+/* Isolates each step of the air feed so a failure can be attributed to
+   connectivity, CORS, authentication, or simply an empty viewport. */
+async function runDiagnostics() {
+  const btn = $('#btn-diag');
+  btn.disabled = true; btn.textContent = 'Running…';
+  Log.add('diag', '--- diagnostics start ---');
+  Log.add('diag', 'Page origin: ' + location.origin + location.pathname);
+  Log.add('diag', 'Protocol: ' + location.protocol + (location.protocol === 'https:' ? ' (ok)' : ' — mixed content will block https feeds'));
+  Log.add('diag', 'Leaflet: ' + (typeof L !== 'undefined' ? 'loaded' : 'MISSING') +
+                  ' · Chart.js: ' + (typeof Chart !== 'undefined' ? 'loaded' : 'MISSING'));
+  Log.add('diag', 'Targets currently in store: ' + targets.size + ' · markers drawn: ' + markers.size);
+  const b = map.getBounds();
+  Log.add('diag', 'Map view: SW ' + b.getSouth().toFixed(3) + ',' + b.getWest().toFixed(3) +
+                  ' → NE ' + b.getNorth().toFixed(3) + ',' + b.getEast().toFixed(3) + ' at zoom ' + map.getZoom());
+
+  // Step 1 — plain anonymous request, no bbox, no auth.
+  try {
+    const t0 = performance.now();
+    const r = await fetch('https://opensky-network.org/api/states/all?lamin=45.8&lomin=5.9&lamax=47.8&lomax=10.5', { cache: 'no-store' });
+    const ms = Math.round(performance.now() - t0);
+    if (r.ok) {
+      const j = await r.json();
+      Log.add('diag', 'STEP 1 anonymous request over Switzerland: OK, HTTP ' + r.status + ', ' +
+        ((j.states || []).length) + ' aircraft, ' + ms + ' ms. Anonymous access and CORS both work.');
+    } else {
+      Log.add('diag', 'STEP 1 anonymous request: HTTP ' + r.status + ' ' + r.statusText +
+        (r.status === 429 ? ' — rate limited. Anonymous credits exhausted; authenticate.' : '') +
+        (r.status === 401 || r.status === 403 ? ' — anonymous access refused. Credentials now required.' : ''));
+    }
+  } catch (e) {
+    Log.add('diag', 'STEP 1 anonymous request: FAILED (' + e.message + '). ' +
+      (e instanceof TypeError
+        ? 'This is a network or CORS block, not a data problem. The API returned no usable CORS header for this origin, or the request never left the browser (extension, ad blocker, or corporate filter). A proxy prefix is the fix.'
+        : ''));
+  }
+
+  // Step 2 — OAuth2 token exchange, only if credentials are present.
+  if (S.osId && S.osSecret) {
+    try {
+      const body = new URLSearchParams({ grant_type: 'client_credentials', client_id: S.osId, client_secret: S.osSecret });
+      const u = 'https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token';
+      const r = await fetch(S.osProxy ? S.osProxy + encodeURIComponent(u) : u, {
+        method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body
+      });
+      Log.add('diag', 'STEP 2 OAuth2 token exchange: HTTP ' + r.status +
+        (r.ok ? ' — token issued.' : ' — check the client ID and secret on your OpenSky account page.'));
+    } catch (e) {
+      Log.add('diag', 'STEP 2 OAuth2 token exchange: FAILED (' + e.message + '). ' +
+        (e instanceof TypeError ? 'The Keycloak token endpoint refused the browser origin. Set a CORS proxy prefix, or run anonymously.' : ''));
+    }
+  } else {
+    Log.add('diag', 'STEP 2 OAuth2: skipped, no client ID/secret entered. Running anonymously.');
+  }
+
+  // Step 3 — marine.
+  Log.add('diag', 'STEP 3 marine: key ' + (S.aisKey ? 'present (' + S.aisKey.length + ' chars)' : 'NOT SET') +
+    ' · feed ' + (S.aisEnabled ? 'enabled' : 'DISABLED') +
+    ' · subscription ' + (S.aisViewport ? 'current view' : 'global'));
+  if (S.aisKey && !S.aisEnabled) Log.add('diag', 'Marine key is set but the feed is switched off. Tick "Marine feed enabled".');
+
+  Log.add('diag', '--- diagnostics end ---');
+  btn.disabled = false; btn.textContent = 'Run diagnostics';
 }
 
 function bindFilters() {
@@ -1489,6 +1638,12 @@ function bindChrome() {
   });
 
   $('#btn-refresh').addEventListener('click', () => OpenSky.reset());
+  $('#btn-diag').addEventListener('click', runDiagnostics);
+  $('#btn-diag-clear').addEventListener('click', () => { $('#diaglog').textContent = ''; });
+  $('#btn-diag-copy').addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(Log.text()); toast('Copied', 'Diagnostic log copied to the clipboard.'); }
+    catch (e) { toast('Copy failed', 'Select the log text manually.', 'warn'); }
+  });
   $('#btn-ais-reconnect').addEventListener('click', () => { S.aisEnabled = true; $('#ais-enabled').checked = true; saveSettings(); AIS.connect(); });
   $('#btn-ais-stop').addEventListener('click', () => { S.aisEnabled = false; $('#ais-enabled').checked = false; saveSettings(); AIS.disconnect(); });
 
