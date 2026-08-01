@@ -1,0 +1,1533 @@
+<!DOCTYPE html>
+<html lang="en-AU" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Situational Traffic Monitor — Live Air &amp; Marine</title>
+<meta name="description" content="Client-side live air and marine traffic monitor. OpenSky state vectors and AISStream position reports on a Leaflet map.">
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="">
+
+<style>
+/* ============================================================
+   Ian Hay visual system — cobalt blue / signal orange
+   ============================================================ */
+:root,[data-theme='dark']{
+  --ih-bg:#10151C; --ih-sidebar:#151B23; --ih-surface:#181F29; --ih-surface-alt:#222C39;
+  --ih-surface-selected:#263B58; --ih-text:#F3F5F8; --ih-text-secondary:#C0C8D3; --ih-text-muted:#9AA6B4;
+  --ih-primary:#7EA8F2; --ih-primary-2:#537DC5; --ih-primary-soft:#263B58;
+  --ih-accent:#F29B4B; --ih-accent-hover:#FFC071; --ih-accent-soft:#613719;
+  --ih-border:#354253; --ih-divider:#2A3543; --ih-focus:#7EA8F2;
+  --ih-success:#7BBA94; --ih-warning:#D5A25E; --ih-error:#E07A74;
+  --ih-map-bg:#182A40; --ih-code-bg:#070B11; --ih-code-text:#EDF2FA;
+  --ih-text-on-primary:#10151C; --ih-primary-hover:#A3C2FA;
+  --ih-text-on-accent:#10151C; --ih-success-soft:#1E3A2B;
+  --ih-shadow-card:0 8px 24px rgba(0,0,0,.22);
+  --ih-shadow-float:0 16px 40px rgba(0,0,0,.34);
+  --ih-scrim:rgba(9,13,19,.86);
+  --s1:4px; --s2:8px; --s3:12px; --s4:16px; --s5:24px; --s6:32px;
+  --r:4px; --r-dialog:6px;
+  --font-head:"Barlow Condensed","Arial Narrow","Segoe UI",sans-serif;
+  --font-body:"IBM Plex Sans","Segoe UI",Arial,sans-serif;
+  --font-mono:"IBM Plex Mono","Cascadia Mono",Consolas,monospace;
+  --topbar-h:56px;
+  color-scheme:dark;
+}
+html[data-theme="light"],[data-theme='light']{
+  --ih-bg:#F3F5F8; --ih-sidebar:#E9EDF3; --ih-surface:#FFFFFF; --ih-surface-alt:#EDF1F6;
+  --ih-surface-selected:#DFE8F6; --ih-text:#191D23; --ih-text-secondary:#505A68; --ih-text-muted:#5F6976;
+  --ih-primary:#24529A; --ih-primary-2:#385F9E; --ih-primary-soft:#DFE8F6;
+  --ih-accent:#D87822; --ih-accent-hover:#C96C1A; --ih-accent-soft:#F5DCC6;
+  --ih-border:#C9CED6; --ih-divider:#D8DDE4; --ih-focus:#5F8FD8;
+  --ih-success:#3E745A; --ih-warning:#A16B24; --ih-error:#B34F4A;
+  --ih-map-bg:#DBE3EE; --ih-code-bg:#172033; --ih-code-text:#EDF2FA;
+  --ih-text-on-primary:#FFFFFF; --ih-primary-hover:#1D4380;
+  --ih-text-on-accent:#191D23; --ih-success-soft:#E4F0E9;
+  --ih-shadow-card:0 4px 14px rgba(29,49,78,.08);
+  --ih-shadow-float:0 12px 32px rgba(29,49,78,.14);
+  --ih-scrim:rgba(243,245,248,.90);
+  color-scheme:light;
+}
+
+*,*::before,*::after{box-sizing:border-box;}
+html,body{height:100%;margin:0;}
+body{
+  font-family:var(--font-body); font-size:15px; line-height:23px;
+  background:var(--ih-bg); color:var(--ih-text); overflow:hidden;
+  -webkit-font-smoothing:antialiased;
+}
+h1,h2,h3,h4{font-family:var(--font-head);margin:0;letter-spacing:.2px;}
+h1{font-size:26px;line-height:30px;font-weight:700;}
+h2{font-size:20px;line-height:24px;font-weight:600;}
+h3{font-size:17px;line-height:21px;font-weight:600;}
+code,.mono,.num{font-family:var(--font-mono);font-size:13px;line-height:20px;}
+button,input,select{font-family:inherit;font-size:14px;color:var(--ih-text);}
+:focus-visible{outline:2px solid var(--ih-focus);outline-offset:2px;border-radius:var(--r);}
+::placeholder{color:var(--ih-text-muted);opacity:1;}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0;}
+
+/* ---------- Layout ---------- */
+.app{display:grid;grid-template-rows:var(--topbar-h) 1fr;height:100dvh;}
+.stage{position:relative;display:grid;grid-template-columns:1fr 0;transition:grid-template-columns .18s ease;min-height:0;}
+.stage.with-sidebar{grid-template-columns:1fr 360px;}
+#map{width:100%;height:100%;background:var(--ih-map-bg);}
+
+/* ---------- Top bar ---------- */
+.topbar{
+  display:flex;align-items:center;gap:var(--s3);padding:0 var(--s3);
+  background:var(--ih-sidebar);border-bottom:1px solid var(--ih-border);z-index:1200;
+}
+.brand{display:flex;align-items:center;gap:var(--s2);padding-right:var(--s3);border-right:1px solid var(--ih-divider);}
+.brand .mark{width:26px;height:26px;flex:none;color:var(--ih-primary);}
+.brand h1{font-size:20px;line-height:24px;white-space:nowrap;}
+.brand .sub{font-family:var(--font-mono);font-size:11px;line-height:16px;color:var(--ih-text-secondary);white-space:nowrap;}
+
+.searchwrap{position:relative;flex:1 1 340px;max-width:420px;}
+.searchwrap .ic{position:absolute;left:9px;top:50%;transform:translateY(-50%);width:16px;height:16px;color:var(--ih-text-secondary);pointer-events:none;}
+input[type="search"],input[type="text"],input[type="password"],input[type="number"],select{
+  width:100%;background:var(--ih-surface);border:1px solid var(--ih-border);border-radius:var(--r);
+  padding:7px 10px;line-height:20px;
+}
+input[type="search"]{padding-left:30px;}
+input:hover,select:hover{border-color:var(--ih-primary-2);}
+input:focus,select:focus{border-color:var(--ih-primary);}
+
+.statusbar{display:flex;align-items:center;gap:var(--s2);margin-left:auto;}
+.pill{
+  display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:3px 10px;
+  font-family:var(--font-mono);font-size:12px;line-height:18px;
+  border:1px solid var(--ih-border);background:var(--ih-surface);color:var(--ih-text);white-space:nowrap;
+}
+.pill .dot{width:8px;height:8px;border-radius:50%;background:var(--ih-text-muted);flex:none;}
+.pill.ok{border-color:var(--ih-success);} .pill.ok .dot{background:var(--ih-success);}
+.pill.warn{border-color:var(--ih-warning);} .pill.warn .dot{background:var(--ih-warning);}
+.pill.err{border-color:var(--ih-error);} .pill.err .dot{background:var(--ih-error);}
+.pill.idle .dot{background:var(--ih-text-muted);}
+
+.btn{
+  display:inline-flex;align-items:center;gap:6px;background:var(--ih-surface);color:var(--ih-text);
+  border:1px solid var(--ih-border);border-radius:var(--r);padding:6px 11px;cursor:pointer;font-weight:500;
+}
+.btn:hover{background:var(--ih-surface-alt);border-color:var(--ih-primary-2);}
+.btn[aria-pressed="true"]{background:var(--ih-surface-selected);border-color:var(--ih-primary);color:var(--ih-text);}
+.btn.primary{background:var(--ih-primary-soft);border-color:var(--ih-primary);}
+.btn.accent{background:var(--ih-accent-soft);border-color:var(--ih-accent);}
+.btn.accent:hover{border-color:var(--ih-accent-hover);}
+.btn:disabled{cursor:not-allowed;background:var(--ih-surface);border-color:var(--ih-divider);color:var(--ih-text-muted);}
+.btn .i{width:16px;height:16px;flex:none;}
+.btn.icon{padding:6px;}
+
+/* ---------- Filter strip ---------- */
+.filters{
+  position:absolute;top:var(--s3);left:var(--s3);z-index:1000;
+  display:flex;flex-wrap:wrap;gap:var(--s2);align-items:flex-end;
+  background:var(--ih-scrim);border:1px solid var(--ih-border);border-radius:var(--r);
+  padding:var(--s3);box-shadow:var(--ih-shadow-float);max-width:min(760px,calc(100% - 24px));
+  backdrop-filter:blur(3px);
+}
+.filters.collapsed .fbody{display:none;}
+.fbody{display:flex;flex-wrap:wrap;gap:var(--s3);align-items:flex-end;}
+.field{display:flex;flex-direction:column;gap:var(--s1);min-width:132px;}
+.field label{font-size:13px;line-height:18px;font-weight:600;color:var(--ih-text-secondary);}
+.field select{padding:5px 8px;}
+.fhead{display:flex;align-items:center;gap:var(--s2);width:100%;}
+.fhead .t{font-family:var(--font-head);font-size:17px;line-height:21px;font-weight:600;}
+.fhead .count{font-family:var(--font-mono);font-size:12px;color:var(--ih-text-secondary);margin-left:auto;}
+
+/* ---------- Sidebar ---------- */
+.sidebar{
+  background:var(--ih-sidebar);border-left:1px solid var(--ih-border);
+  overflow:auto;overscroll-behavior:contain;display:flex;flex-direction:column;gap:var(--s3);padding:var(--s4);
+}
+.stage:not(.with-sidebar) .sidebar{display:none;}
+.card{background:var(--ih-surface);border:1px solid var(--ih-border);border-radius:var(--r);padding:var(--s4);box-shadow:var(--ih-shadow-card);}
+.card h2,.card h3{margin-bottom:var(--s3);}
+.metrics{display:grid;grid-template-columns:1fr 1fr;gap:var(--s2);}
+.metric{background:var(--ih-surface-alt);border:1px solid var(--ih-divider);border-radius:var(--r);padding:var(--s2) var(--s3);}
+.metric .k{font-size:12px;line-height:17px;font-weight:600;color:var(--ih-text-secondary);text-transform:uppercase;letter-spacing:.4px;}
+.metric .v{font-family:var(--font-mono);font-size:19px;line-height:26px;font-weight:500;color:var(--ih-text);}
+.metric .u{font-size:12px;color:var(--ih-text-secondary);}
+.metric.hero{grid-column:span 2;border-left:3px solid var(--ih-primary);}
+.metric.hero.marine{border-left-color:var(--ih-accent);}
+.chartbox{position:relative;height:180px;}
+table.rank{width:100%;border-collapse:collapse;}
+table.rank th,table.rank td{text-align:left;padding:5px 6px;border-bottom:1px solid var(--ih-divider);font-size:13px;line-height:19px;}
+table.rank th{font-weight:600;color:var(--ih-text);background:var(--ih-surface-alt);}
+table.rank td.n{font-family:var(--font-mono);text-align:right;}
+.empty{color:var(--ih-text-secondary);font-size:13px;line-height:19px;}
+
+/* ---------- Settings drawer ---------- */
+.drawer{
+  position:fixed;inset:0 0 0 auto;width:min(440px,100%);background:var(--ih-sidebar);
+  border-left:1px solid var(--ih-border);box-shadow:var(--ih-shadow-float);z-index:2000;
+  transform:translateX(100%);transition:transform .18s ease;display:flex;flex-direction:column;
+}
+.drawer[data-open="true"]{transform:none;}
+.drawer header{display:flex;align-items:center;gap:var(--s2);padding:var(--s3) var(--s4);border-bottom:1px solid var(--ih-border);}
+.drawer .body{padding:var(--s4);overflow:auto;display:flex;flex-direction:column;gap:var(--s4);}
+fieldset{border:1px solid var(--ih-border);border-radius:var(--r);padding:var(--s3);margin:0;}
+legend{font-family:var(--font-head);font-size:17px;font-weight:600;padding:0 6px;}
+.row{display:flex;flex-direction:column;gap:var(--s1);margin-bottom:var(--s3);}
+.row:last-child{margin-bottom:0;}
+.row label{font-size:13px;line-height:18px;font-weight:600;}
+.row .hint{font-size:13px;line-height:19px;color:var(--ih-text-secondary);}
+.check{display:flex;gap:var(--s2);align-items:flex-start;}
+.check input{margin-top:4px;accent-color:var(--ih-primary);width:16px;height:16px;flex:none;}
+.callout{border:1px solid var(--ih-border);border-left:3px solid var(--ih-primary);border-radius:var(--r);
+  background:var(--ih-surface);padding:var(--s3);font-size:13px;line-height:20px;}
+.callout.warn{border-left-color:var(--ih-accent);}
+.callout strong{display:block;font-family:var(--font-head);font-size:15px;letter-spacing:.2px;margin-bottom:2px;}
+a{color:var(--ih-primary);}
+
+/* ---------- Map chrome ---------- */
+.leaflet-container{background:var(--ih-map-bg);font-family:var(--font-body);}
+.leaflet-control-layers,.leaflet-bar a,.leaflet-control-attribution{
+  background:var(--ih-surface)!important;color:var(--ih-text)!important;border-color:var(--ih-border)!important;
+}
+.leaflet-control-layers{border-radius:var(--r)!important;box-shadow:var(--ih-shadow-card)!important;padding:2px;}
+.leaflet-control-layers-expanded{padding:10px 12px;}
+.leaflet-control-layers label{font-size:13px;line-height:20px;}
+.leaflet-bar a{border-bottom-color:var(--ih-border)!important;}
+.leaflet-bar a:hover{background:var(--ih-surface-alt)!important;}
+.leaflet-control-attribution{font-size:11px;padding:1px 6px;}
+.leaflet-control-attribution a{color:var(--ih-primary)!important;}
+.leaflet-popup-content-wrapper,.leaflet-popup-tip{
+  background:var(--ih-surface);color:var(--ih-text);border:1px solid var(--ih-border);
+  border-radius:var(--r);box-shadow:var(--ih-shadow-float);
+}
+.leaflet-popup-content{margin:12px 14px;min-width:250px;}
+.leaflet-popup-close-button{color:var(--ih-text-secondary)!important;}
+
+.pop h3{margin:0 0 2px;}
+.pop .sub{font-family:var(--font-mono);font-size:12px;line-height:18px;color:var(--ih-text-secondary);margin-bottom:8px;}
+.pop dl{display:grid;grid-template-columns:auto 1fr;gap:2px 10px;margin:0 0 10px;}
+.pop dt{font-size:12px;line-height:18px;font-weight:600;color:var(--ih-text-secondary);}
+.pop dd{margin:0;font-family:var(--font-mono);font-size:12px;line-height:18px;}
+.pop .acts{display:flex;gap:6px;flex-wrap:wrap;}
+.pop .acts .btn{padding:4px 8px;font-size:13px;}
+.badge{display:inline-flex;align-items:center;gap:4px;border-radius:999px;padding:1px 8px;font-size:12px;line-height:18px;font-weight:600;border:1px solid var(--ih-border);background:var(--ih-surface-alt);}
+.badge.demo{border-color:var(--ih-accent);background:var(--ih-accent-soft);color:var(--ih-text);}
+
+/* vehicle markers */
+.veh{will-change:transform;}
+.veh svg{display:block;overflow:visible;}
+.veh .body{stroke:rgba(8,12,18,.85);stroke-width:1;}
+html[data-theme="light"] .veh .body{stroke:rgba(255,255,255,.9);}
+.veh.sel .halo{stroke:var(--ih-accent);stroke-width:2.5;fill:none;}
+.veh.demo .body{stroke-dasharray:2 2;}
+
+.legend{
+  position:absolute;left:var(--s3);bottom:26px;z-index:1000;background:var(--ih-scrim);
+  border:1px solid var(--ih-border);border-radius:var(--r);padding:var(--s2) var(--s3);
+  box-shadow:var(--ih-shadow-card);max-width:260px;backdrop-filter:blur(3px);
+}
+.legend h4{font-size:13px;line-height:18px;margin-bottom:4px;letter-spacing:.4px;text-transform:uppercase;}
+.legend ul{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:1fr 1fr;gap:1px 10px;}
+.legend li{display:flex;align-items:center;gap:6px;font-size:12px;line-height:18px;color:var(--ih-text);}
+.legend .sw{width:10px;height:10px;border-radius:2px;flex:none;border:1px solid rgba(0,0,0,.4);}
+.legend.collapsed ul{display:none;}
+
+/* toasts */
+.toasts{position:fixed;right:var(--s4);bottom:var(--s4);z-index:3000;display:flex;flex-direction:column;gap:var(--s2);max-width:380px;}
+.toast{background:var(--ih-surface);border:1px solid var(--ih-border);border-left:3px solid var(--ih-primary);
+  border-radius:var(--r);padding:10px 12px;box-shadow:var(--ih-shadow-float);font-size:13px;line-height:20px;}
+.toast.warn{border-left-color:var(--ih-accent);}
+.toast.err{border-left-color:var(--ih-error);}
+.toast strong{display:block;font-family:var(--font-head);font-size:15px;}
+
+@media (max-width:1100px){
+  .stage.with-sidebar{grid-template-columns:1fr 320px;}
+  .brand .sub{display:none;}
+}
+@media (max-width:820px){
+  .app{grid-template-rows:auto 1fr;}
+  .topbar{flex-wrap:wrap;padding:var(--s2);gap:var(--s2);}
+  .searchwrap{order:3;flex-basis:100%;max-width:none;}
+  .stage.with-sidebar{grid-template-columns:1fr;grid-template-rows:1fr 46%;}
+  .sidebar{border-left:none;border-top:1px solid var(--ih-border);}
+  .filters{left:var(--s2);top:var(--s2);right:var(--s2);max-width:none;}
+  .legend{display:none;}
+}
+@media (prefers-reduced-motion:reduce){
+  *{transition:none!important;animation:none!important;}
+}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- ================= Top bar ================= -->
+  <header class="topbar">
+    <div class="brand">
+      <svg class="mark" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true">
+        <path d="M12 2v20M2 12h20" opacity=".35"/><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/>
+      </svg>
+      <div>
+        <h1>Traffic Monitor</h1>
+        <div class="sub">AIR + MARINE · CLIENT-SIDE</div>
+      </div>
+    </div>
+
+    <div class="searchwrap">
+      <svg class="ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+      <label class="sr-only" for="q">Search by callsign, ICAO24, vessel name or MMSI</label>
+      <input id="q" type="search" placeholder="Search callsign / ICAO24 / vessel / MMSI…" autocomplete="off" spellcheck="false">
+    </div>
+
+    <div class="statusbar">
+      <span class="pill idle" id="st-air" title="OpenSky air feed status"><span class="dot"></span><span class="lbl">AIR idle</span></span>
+      <span class="pill idle" id="st-sea" title="AISStream marine feed status"><span class="dot"></span><span class="lbl">SEA idle</span></span>
+      <button class="btn icon" id="btn-refresh" title="Refresh air traffic now" aria-label="Refresh air traffic now">
+        <svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-2.6-6.4"/><path d="M21 3v6h-6"/></svg>
+      </button>
+      <button class="btn icon" id="btn-theme" title="Toggle light / dark theme" aria-label="Toggle light or dark theme">
+        <svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 13A9 9 0 1 1 11 3a7 7 0 0 0 10 10z"/></svg>
+      </button>
+      <button class="btn" id="btn-sidebar" aria-pressed="true" title="Toggle analytics sidebar">
+        <svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 3h18v18H3z"/><path d="M15 3v18"/></svg>
+        <span>Analytics</span>
+      </button>
+      <button class="btn accent" id="btn-settings" title="Open settings and API keys">
+        <svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-2.9 1.2V21a2 2 0 1 1-4 0v-.1A1.7 1.7 0 0 0 7 19.4a1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1A1.7 1.7 0 0 0 3 14a2 2 0 1 1 0-4h.1A1.7 1.7 0 0 0 4.6 7a1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1A1.7 1.7 0 0 0 10 3.1V3a2 2 0 1 1 4 0v.1A1.7 1.7 0 0 0 17 4.6a1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V10a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.9 1z"/></svg>
+        <span>Settings</span>
+      </button>
+    </div>
+  </header>
+
+  <!-- ================= Stage ================= -->
+  <div class="stage with-sidebar" id="stage">
+    <div style="position:relative;min-height:0;">
+      <div id="map" role="application" aria-label="Live air and marine traffic map"></div>
+
+      <!-- Filter panel -->
+      <section class="filters" id="filters" aria-label="Search and filter">
+        <div class="fhead">
+          <span class="t">Filters</span>
+          <span class="count" id="f-count">0 shown</span>
+          <button class="btn icon" id="btn-filters" aria-expanded="true" aria-controls="fbody" title="Collapse filters">
+            <svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
+          </button>
+        </div>
+        <div class="fbody" id="fbody">
+          <div class="field">
+            <label for="f-domain">Domain</label>
+            <select id="f-domain">
+              <option value="all">All traffic</option>
+              <option value="air">Aircraft only</option>
+              <option value="sea">Marine only</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="f-subtype">Sub-type</label>
+            <select id="f-subtype"><option value="all">All sub-types</option></select>
+          </div>
+          <div class="field">
+            <label for="f-origin">Origin / departure</label>
+            <select id="f-origin"><option value="all">Any origin</option></select>
+          </div>
+          <div class="field">
+            <label for="f-dest">Destination</label>
+            <select id="f-dest"><option value="all">Any destination</option></select>
+          </div>
+          <div class="field" style="min-width:120px;">
+            <label for="f-ground">Movement</label>
+            <select id="f-ground">
+              <option value="all">Moving + stationary</option>
+              <option value="moving">Moving only</option>
+            </select>
+          </div>
+          <button class="btn" id="btn-clear" title="Reset all filters">Reset</button>
+        </div>
+      </section>
+
+      <!-- Legend -->
+      <aside class="legend" id="legend" aria-label="Marker colour legend">
+        <h4>Legend</h4>
+        <ul id="legend-list"></ul>
+      </aside>
+    </div>
+
+    <!-- ================= Analytics sidebar ================= -->
+    <aside class="sidebar" id="sidebar" aria-label="Analytics dashboard">
+      <div class="card">
+        <h2>Active Traffic</h2>
+        <div class="metrics">
+          <div class="metric hero"><div class="k">Aircraft tracked</div><div class="v" id="m-air">0</div></div>
+          <div class="metric hero marine"><div class="k">Vessels tracked</div><div class="v" id="m-sea">0</div></div>
+          <div class="metric"><div class="k">Avg ground speed</div><div class="v" id="m-spd">–<span class="u"> kn</span></div></div>
+          <div class="metric"><div class="k">Highest altitude</div><div class="v" id="m-alt">–<span class="u"> ft</span></div></div>
+          <div class="metric"><div class="k">Airborne / on ground</div><div class="v" id="m-airborne">–</div></div>
+          <div class="metric"><div class="k">Median vessel LOA</div><div class="v" id="m-loa">–<span class="u"> m</span></div></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Category breakdown</h3>
+        <div class="chartbox"><canvas id="c-cat" aria-label="Traffic by category" role="img"></canvas></div>
+      </div>
+
+      <div class="card">
+        <h3>Sub-type distribution</h3>
+        <div class="chartbox" style="height:210px;"><canvas id="c-sub" aria-label="Traffic by sub-type" role="img"></canvas></div>
+      </div>
+
+      <div class="card">
+        <h3>Vessel length (LOA)</h3>
+        <div class="chartbox"><canvas id="c-loa" aria-label="Vessel length distribution" role="img"></canvas></div>
+        <p class="empty" id="loa-note">Requires AIS static data (vessel dimensions).</p>
+      </div>
+
+      <div class="card">
+        <h3>Top origins</h3>
+        <table class="rank"><thead><tr><th scope="col">Origin country / departure</th><th scope="col" class="n">Count</th></tr></thead><tbody id="t-origin"></tbody></table>
+      </div>
+
+      <div class="card">
+        <h3>Top declared destinations</h3>
+        <table class="rank"><thead><tr><th scope="col">Destination (AIS)</th><th scope="col" class="n">Count</th></tr></thead><tbody id="t-dest"></tbody></table>
+        <p class="empty">OpenSky state vectors carry no destination field, so this table reflects AIS voyage data only.</p>
+      </div>
+
+      <div class="card">
+        <h3>Tracked breadcrumbs</h3>
+        <div id="track-list"><p class="empty">No breadcrumb tracks pinned. Open a vehicle pop-up and choose <em>Track</em>.</p></div>
+      </div>
+    </aside>
+  </div>
+</div>
+
+<!-- ================= Settings drawer ================= -->
+<div class="drawer" id="drawer" data-open="false" role="dialog" aria-modal="false" aria-labelledby="drawer-t">
+  <header>
+    <h2 id="drawer-t">Settings &amp; Feeds</h2>
+    <button class="btn icon" id="btn-close-settings" style="margin-left:auto" aria-label="Close settings">
+      <svg class="i" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6 6 18M6 6l12 12"/></svg>
+    </button>
+  </header>
+  <div class="body">
+
+    <div class="callout warn">
+      <strong>Credentials stay on this device</strong>
+      Keys are held in this browser's local storage only. They are never committed to the repository and never sent anywhere except the feed provider. Anyone using your deployed page must enter their own keys. Treat any key pasted into a browser page as semi-public — use a throwaway OpenSky API client, not your main account.
+    </div>
+
+    <fieldset>
+      <legend>Air traffic — OpenSky Network</legend>
+      <div class="row">
+        <label for="os-id">OAuth2 client ID</label>
+        <input id="os-id" type="text" autocomplete="off" spellcheck="false" placeholder="e.g. ihay-api-client">
+        <span class="hint">Optional. Leave both fields blank for anonymous access (heavily rate-limited).</span>
+      </div>
+      <div class="row">
+        <label for="os-secret">OAuth2 client secret</label>
+        <input id="os-secret" type="password" autocomplete="off" spellcheck="false" placeholder="client secret">
+      </div>
+      <div class="row">
+        <label for="os-interval">Polling interval (seconds)</label>
+        <input id="os-interval" type="number" min="5" max="600" step="1" value="15">
+        <span class="hint">Minimum 5 s. Automatic back-off doubles this on HTTP 429 until the limit clears.</span>
+      </div>
+      <div class="row check">
+        <input id="os-bbox" type="checkbox" checked>
+        <label for="os-bbox">Restrict requests to the current map view<br><span class="hint">Strongly recommended — a bounding box costs far fewer daily credits than a global request.</span></label>
+      </div>
+      <div class="row check">
+        <input id="os-enabled" type="checkbox" checked>
+        <label for="os-enabled">Air feed enabled</label>
+      </div>
+      <div class="row">
+        <label for="os-proxy">CORS proxy prefix (optional)</label>
+        <input id="os-proxy" type="text" autocomplete="off" spellcheck="false" placeholder="https://your-worker.example.workers.dev/?url=">
+        <span class="hint">Only needed if the OAuth token endpoint blocks browser origins. Prefixed to the token and API URLs.</span>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Marine traffic — AISStream.io</legend>
+      <div class="row">
+        <label for="ais-key">API key</label>
+        <input id="ais-key" type="password" autocomplete="off" spellcheck="false" placeholder="aisstream.io API key">
+        <span class="hint">Free key from aisstream.io. Without it, no live marine data can be received.</span>
+      </div>
+      <div class="row check">
+        <input id="ais-viewport" type="checkbox" checked>
+        <label for="ais-viewport">Subscribe to the current map view<br><span class="hint">AIS subscriptions are fixed at connection time. Use <em>Re-subscribe</em> after panning.</span></label>
+      </div>
+      <div class="row check">
+        <input id="ais-enabled" type="checkbox">
+        <label for="ais-enabled">Marine feed enabled</label>
+      </div>
+      <div class="row" style="flex-direction:row;gap:8px;">
+        <button class="btn primary" id="btn-ais-reconnect">Re-subscribe to view</button>
+        <button class="btn" id="btn-ais-stop">Disconnect</button>
+      </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Display &amp; performance</legend>
+      <div class="row">
+        <label for="cap">Maximum rendered markers</label>
+        <input id="cap" type="number" min="100" max="6000" step="100" value="900">
+        <span class="hint">Nearest-to-centre markers are drawn first. Filters still count all traffic.</span>
+      </div>
+      <div class="row">
+        <label for="stale">Drop stale targets after (seconds)</label>
+        <input id="stale" type="number" min="30" max="3600" step="10" value="180">
+      </div>
+      <div class="row">
+        <label for="trail">Breadcrumb points per track</label>
+        <input id="trail" type="number" min="10" max="1000" step="10" value="240">
+      </div>
+      <div class="row check">
+        <input id="demo" type="checkbox">
+        <label for="demo">Enable synthetic demo vessels<br><span class="hint">Simulated, not real. Every demo target is flagged <span class="badge demo">DEMO</span> in its pop-up and drawn with a dashed outline. Use only for UI testing without an AIS key.</span></label>
+      </div>
+    </fieldset>
+
+    <div class="callout">
+      <strong>Data attribution</strong>
+      Air traffic: OpenSky Network state vectors, CC BY-SA 4.0 for research/non-commercial use. Marine traffic: AISStream.io relay of terrestrial AIS receivers — coverage is coastal and incomplete. Basemaps © OpenStreetMap contributors, © CARTO, and Esri/Maxar as attributed on the map.
+    </div>
+  </div>
+</div>
+
+<div class="toasts" id="toasts" role="status" aria-live="polite"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script>
+"use strict";
+/* ==========================================================================
+   Situational Traffic Monitor
+   Vanilla ES6+, no build step, no backend. Modules are IIFE-scoped sections.
+   ========================================================================== */
+
+/* -------------------------------------------------------------------------
+   0. Small utilities
+   ------------------------------------------------------------------------- */
+const $  = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
+const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+const nowSec = () => Date.now() / 1000;
+
+const Store = (() => {
+  // localStorage can throw in sandboxed iframes; fall back to memory.
+  const mem = new Map();
+  let ok = true;
+  try { const k = '__t'; localStorage.setItem(k, '1'); localStorage.removeItem(k); }
+  catch (e) { ok = false; }
+  return {
+    get(k, d) {
+      try { const v = ok ? localStorage.getItem(k) : (mem.has(k) ? mem.get(k) : null);
+            return v === null ? d : JSON.parse(v); }
+      catch (e) { return d; }
+    },
+    set(k, v) {
+      try { const s = JSON.stringify(v); if (ok) localStorage.setItem(k, s); else mem.set(k, s); }
+      catch (e) { /* quota or blocked — non-fatal */ }
+    }
+  };
+})();
+
+const KEY = 'stm.settings.v1';
+const DEFAULTS = {
+  osId: '', osSecret: '', osInterval: 15, osBbox: true, osEnabled: true, osProxy: '',
+  aisKey: '', aisViewport: true, aisEnabled: false,
+  cap: 900, stale: 180, trail: 240, demo: false,
+  theme: 'dark', sidebar: true, basemap: 'Dark Matter'
+};
+let S = Object.assign({}, DEFAULTS, Store.get(KEY, {}));
+const saveSettings = () => Store.set(KEY, S);
+
+function toast(title, msg, kind) {
+  const el = document.createElement('div');
+  el.className = 'toast' + (kind ? ' ' + kind : '');
+  const t = document.createElement('strong'); t.textContent = title;
+  el.appendChild(t);
+  el.appendChild(document.createTextNode(msg || ''));
+  $('#toasts').appendChild(el);
+  setTimeout(() => { el.style.opacity = '0'; setTimeout(() => el.remove(), 400); }, 7000);
+}
+function setStatus(id, kind, label) {
+  const el = $(id);
+  el.className = 'pill ' + kind;
+  $('.lbl', el).textContent = label;
+}
+const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, c =>
+  ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+const MS_TO_KN = 1.943844;
+const M_TO_FT  = 3.280839895;
+const fmt = (v, d = 0) => (v === null || v === undefined || Number.isNaN(v)) ? '–' : Number(v).toFixed(d);
+
+/* -------------------------------------------------------------------------
+   1. Classification tables (colour + sub-type)
+   ------------------------------------------------------------------------- */
+const PALETTE = {
+  dark:  { blue:'#7EA8F2', blue2:'#537DC5', orange:'#F29B4B', green:'#7BBA94',
+           steel:'#9CB6DB', ochre:'#D8B35E', brick:'#E07A74', grey:'#9AA6B4' },
+  light: { blue:'#24529A', blue2:'#385F9E', orange:'#D87822', green:'#3E745A',
+           steel:'#5D78A4', ochre:'#B88A2A', brick:'#B34F4A', grey:'#5F6976' }
+};
+const pal = () => PALETTE[document.documentElement.dataset.theme === 'light' ? 'light' : 'dark'];
+
+// OpenSky "category" field (index 17, extended=1)
+const AIR_CATS = {
+  2:'Light aircraft', 3:'Small aircraft', 4:'Large aircraft', 5:'High-vortex large',
+  6:'Heavy aircraft', 7:'High performance', 8:'Rotorcraft', 9:'Glider',
+  10:'Lighter-than-air', 11:'Parachutist', 12:'Ultralight', 14:'UAV', 15:'Space vehicle',
+  16:'Surface emergency', 17:'Surface service'
+};
+function airSubtype(st) {
+  const c = st.cat;
+  if (AIR_CATS[c]) return AIR_CATS[c];
+  if (st.onGround) return 'On ground (uncategorised)';
+  return 'Uncategorised';
+}
+function airColour(st) {
+  const p = pal(), c = st.cat;
+  if (st.onGround) return p.grey;
+  if (c === 8) return p.green;                       // rotorcraft
+  if (c === 9 || c === 10 || c === 11 || c === 12) return p.ochre; // sport / light
+  if (c === 14) return p.brick;                      // UAV
+  if (c === 5 || c === 6) return p.orange;           // heavy
+  if (c === 4) return p.blue;                        // large commercial
+  if (c === 2 || c === 3) return p.steel;            // general aviation
+  return p.blue2;
+}
+
+// AIS ship-and-cargo type codes
+function seaSubtype(t) {
+  if (t == null) return 'Unknown vessel';
+  if (t >= 20 && t <= 29) return 'WIG craft';
+  if (t === 30) return 'Fishing';
+  if (t === 31 || t === 32) return 'Towing';
+  if (t === 33) return 'Dredger';
+  if (t === 34) return 'Diving ops';
+  if (t === 35) return 'Military ops';
+  if (t === 36) return 'Sailing';
+  if (t === 37) return 'Pleasure craft';
+  if (t >= 40 && t <= 49) return 'High-speed craft';
+  if (t === 50) return 'Pilot vessel';
+  if (t === 51) return 'Search & rescue';
+  if (t === 52) return 'Tug';
+  if (t === 53) return 'Port tender';
+  if (t === 55) return 'Law enforcement';
+  if (t === 58) return 'Medical transport';
+  if (t >= 50 && t <= 59) return 'Special craft';
+  if (t >= 60 && t <= 69) return 'Passenger vessel';
+  if (t >= 70 && t <= 79) return 'Cargo vessel';
+  if (t >= 80 && t <= 89) return 'Tanker';
+  if (t >= 90 && t <= 99) return 'Other';
+  return 'Unknown vessel';
+}
+function seaColour(t) {
+  const p = pal();
+  if (t == null) return p.grey;
+  if (t >= 80 && t <= 89) return p.brick;   // tanker
+  if (t >= 70 && t <= 79) return p.ochre;   // cargo
+  if (t >= 60 && t <= 69) return p.orange;  // passenger
+  if (t === 30) return p.green;             // fishing
+  if (t === 52 || t === 31 || t === 32) return p.steel;
+  if (t >= 40 && t <= 49) return p.blue;    // HSC
+  return p.blue2;
+}
+
+const LEGEND = [
+  ['Large commercial', () => pal().blue],
+  ['Heavy aircraft',   () => pal().orange],
+  ['General aviation', () => pal().steel],
+  ['Rotorcraft',       () => pal().green],
+  ['Tanker',           () => pal().brick],
+  ['Cargo vessel',     () => pal().ochre],
+  ['Passenger vessel', () => pal().orange],
+  ['On ground / moored', () => pal().grey]
+];
+function drawLegend() {
+  const ul = $('#legend-list'); ul.innerHTML = '';
+  LEGEND.forEach(([label, colour]) => {
+    const li = document.createElement('li');
+    const sw = document.createElement('span');
+    sw.className = 'sw'; sw.style.background = colour();
+    li.appendChild(sw);
+    li.appendChild(document.createTextNode(label));
+    ul.appendChild(li);
+  });
+}
+
+/* -------------------------------------------------------------------------
+   2. Map + basemaps
+   ------------------------------------------------------------------------- */
+const map = L.map('map', {
+  center: [-31.98, 115.86],   // Perth, Western Australia
+  zoom: 7, zoomControl: true, worldCopyJump: true, preferCanvas: false
+});
+map.attributionControl.setPrefix('');
+
+const basemaps = {
+  'OpenStreetMap': L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19, attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+  }),
+  'Dark Matter': L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+    maxZoom: 20, subdomains: 'abcd',
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
+  }),
+  'Positron (light)': L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+    maxZoom: 20, subdomains: 'abcd',
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>'
+  }),
+  'Esri World Imagery': L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+    maxZoom: 19, attribution: 'Imagery &copy; Esri, Maxar, Earthstar Geographics'
+  })
+};
+(basemaps[S.basemap] || basemaps['Dark Matter']).addTo(map);
+L.control.layers(basemaps, null, { position: 'topright', collapsed: true }).addTo(map);
+map.on('baselayerchange', e => { S.basemap = e.name; saveSettings(); });
+
+const trackLayer  = L.layerGroup().addTo(map);
+const markerLayer = L.layerGroup().addTo(map);
+
+/* -------------------------------------------------------------------------
+   3. Target store
+   Unified record:
+   { id, domain:'air'|'sea', name, sub, colour, lat, lon, hdg, sogKn, altFt,
+     origin, dest, meta{}, ts, demo, history:[[lat,lon,ts]] }
+   ------------------------------------------------------------------------- */
+const targets = new Map();
+const tracked = new Set();     // ids with pinned breadcrumbs
+let selectedId = null;
+
+function upsert(rec) {
+  const prev = targets.get(rec.id);
+  if (prev) {
+    // preserve breadcrumb history and merged static metadata
+    rec.history = prev.history;
+    rec.meta = Object.assign({}, prev.meta, rec.meta);
+    if (rec.name == null) rec.name = prev.name;
+    if (rec.sub == null || rec.sub === 'Unknown vessel') rec.sub = prev.sub || rec.sub;
+    if (rec.dest == null) rec.dest = prev.dest;
+    if (rec.origin == null) rec.origin = prev.origin;
+  } else {
+    rec.history = [];
+  }
+  if (Number.isFinite(rec.lat) && Number.isFinite(rec.lon)) {
+    const h = rec.history, last = h[h.length - 1];
+    if (!last || Math.abs(last[0] - rec.lat) > 1e-6 || Math.abs(last[1] - rec.lon) > 1e-6) {
+      h.push([rec.lat, rec.lon, rec.ts]);
+      const cap = clamp(Number(S.trail) || 240, 10, 1000);
+      if (h.length > cap) h.splice(0, h.length - cap);
+    }
+  }
+  targets.set(rec.id, rec);
+}
+
+function pruneStale() {
+  const cutoff = nowSec() - clamp(Number(S.stale) || 180, 30, 3600);
+  let n = 0;
+  targets.forEach((t, id) => {
+    if (t.ts < cutoff && id !== selectedId && !tracked.has(id)) { targets.delete(id); n++; }
+  });
+  return n;
+}
+
+/* -------------------------------------------------------------------------
+   4. Air feed — OpenSky Network
+   Anonymous access still works but is severely rate-limited. Authenticated
+   access uses the OAuth2 client-credentials flow (basic auth was retired).
+   ------------------------------------------------------------------------- */
+const OpenSky = (() => {
+  const TOKEN_URL = 'https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token';
+  const API_URL   = 'https://opensky-network.org/api/states/all';
+  let token = null, tokenExp = 0, timer = null, backoff = 1, inflight = false;
+
+  const px = (u) => S.osProxy ? S.osProxy + encodeURIComponent(u) : u;
+
+  async function getToken() {
+    if (!S.osId || !S.osSecret) return null;
+    if (token && Date.now() < tokenExp - 60000) return token;
+    const body = new URLSearchParams({
+      grant_type: 'client_credentials', client_id: S.osId, client_secret: S.osSecret
+    });
+    const res = await fetch(px(TOKEN_URL), {
+      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body
+    });
+    if (!res.ok) throw new Error('Token request failed (HTTP ' + res.status + ')');
+    const j = await res.json();
+    token = j.access_token;
+    tokenExp = Date.now() + (Number(j.expires_in) || 1800) * 1000;
+    return token;
+  }
+
+  function buildUrl() {
+    const p = new URLSearchParams({ extended: '1' });
+    if (S.osBbox) {
+      const b = map.getBounds();
+      p.set('lamin', clamp(b.getSouth(), -90, 90).toFixed(4));
+      p.set('lamax', clamp(b.getNorth(), -90, 90).toFixed(4));
+      p.set('lomin', clamp(b.getWest(), -180, 180).toFixed(4));
+      p.set('lomax', clamp(b.getEast(), -180, 180).toFixed(4));
+    }
+    return API_URL + '?' + p.toString();
+  }
+
+  function ingest(json) {
+    const ts = Number(json.time) || nowSec();
+    const rows = json.states || [];
+    let kept = 0;
+    rows.forEach(s => {
+      const lat = s[6], lon = s[5];
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+      const cat = Number.isFinite(s[17]) ? s[17] : null;
+      const rec = {
+        id: 'A:' + s[0], domain: 'air',
+        name: (s[1] || '').trim() || s[0].toUpperCase(),
+        origin: s[2] || 'Unknown',
+        dest: null,
+        cat, onGround: !!s[8],
+        lat, lon,
+        hdg: Number.isFinite(s[10]) ? s[10] : 0,
+        sogKn: Number.isFinite(s[9]) ? s[9] * MS_TO_KN : null,
+        altFt: Number.isFinite(s[13]) ? s[13] * M_TO_FT
+             : (Number.isFinite(s[7]) ? s[7] * M_TO_FT : null),
+        ts: Number.isFinite(s[4]) ? s[4] : ts,
+        demo: false,
+        meta: {
+          icao24: s[0], squawk: s[14] || null,
+          vrate: Number.isFinite(s[11]) ? s[11] : null,
+          src: ['ADS-B', 'ASTERIX', 'MLAT', 'FLARM'][s[16]] || 'Unknown'
+        }
+      };
+      rec.sub = airSubtype(rec);
+      rec.colour = airColour(rec);
+      upsert(rec); kept++;
+    });
+    return kept;
+  }
+
+  async function poll() {
+    if (inflight || !S.osEnabled) return;
+    inflight = true;
+    setStatus('#st-air', 'warn', 'AIR polling');
+    try {
+      const headers = {};
+      let auth = false;
+      if (S.osId && S.osSecret) {
+        try { const t = await getToken(); if (t) { headers.Authorization = 'Bearer ' + t; auth = true; } }
+        catch (e) {
+          toast('OpenSky auth failed', e.message + ' — continuing anonymously. If this is a CORS block, set a proxy prefix in Settings.', 'warn');
+        }
+      }
+      const res = await fetch(px(buildUrl()), { headers, cache: 'no-store' });
+      if (res.status === 429) {
+        backoff = clamp(backoff * 2, 2, 16);
+        const ra = res.headers.get('Retry-After');
+        setStatus('#st-air', 'err', 'AIR rate-limited');
+        toast('OpenSky rate limit', 'Backing off to ' + interval() + ' s' + (ra ? ' (Retry-After ' + ra + ' s)' : '') + '. Authenticate or widen the polling interval.', 'warn');
+        return;
+      }
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const kept = ingest(await res.json());
+      backoff = 1;
+      const rem = res.headers.get('X-Rate-Limit-Remaining');
+      setStatus('#st-air', 'ok', 'AIR ' + kept + (auth ? ' auth' : ' anon') + (rem ? ' · ' + rem + ' cr' : ''));
+      Dash.refresh();
+    } catch (e) {
+      setStatus('#st-air', 'err', 'AIR error');
+      toast('Air feed error', e.message + '. Check network access, or that opensky-network.org is reachable from this origin.', 'err');
+      backoff = clamp(backoff * 2, 1, 16);
+    } finally {
+      inflight = false;
+      schedule();
+    }
+  }
+
+  const interval = () => clamp(Number(S.osInterval) || 15, 5, 600) * backoff;
+  function schedule() {
+    clearTimeout(timer);
+    if (S.osEnabled) timer = setTimeout(poll, interval() * 1000);
+  }
+  function start() { clearTimeout(timer); if (S.osEnabled) poll(); else setStatus('#st-air', 'idle', 'AIR off'); }
+  function stop()  { clearTimeout(timer); setStatus('#st-air', 'idle', 'AIR off'); }
+  function reset() { backoff = 1; token = null; tokenExp = 0; start(); }
+  return { start, stop, poll, reset };
+})();
+
+/* -------------------------------------------------------------------------
+   5. Marine feed — AISStream WebSocket
+   The subscription message is read once at connect time, so changing the
+   bounding box requires a reconnect.
+   ------------------------------------------------------------------------- */
+const AIS = (() => {
+  const URL = 'wss://stream.aisstream.io/v0/stream';
+  let ws = null, retry = 0, retryTimer = null, msgCount = 0, manualStop = false;
+
+  function bbox() {
+    if (!S.aisViewport) return [[[-90, -180], [90, 180]]];
+    const b = map.getBounds();
+    return [[[clamp(b.getSouth(), -90, 90), clamp(b.getWest(), -180, 180)],
+             [clamp(b.getNorth(), -90, 90), clamp(b.getEast(), -180, 180)]]];
+  }
+
+  function connect() {
+    if (!S.aisEnabled) { setStatus('#st-sea', 'idle', 'SEA off'); return; }
+    if (!S.aisKey) {
+      setStatus('#st-sea', 'warn', 'SEA no key');
+      toast('AIS key required', 'Add a free aisstream.io API key in Settings to receive live marine data.', 'warn');
+      return;
+    }
+    disconnect(true);
+    manualStop = false;
+    setStatus('#st-sea', 'warn', 'SEA connecting');
+    try { ws = new WebSocket(URL); } catch (e) {
+      setStatus('#st-sea', 'err', 'SEA failed'); toast('AIS connection failed', e.message, 'err'); return;
+    }
+
+    ws.onopen = () => {
+      retry = 0; msgCount = 0;
+      ws.send(JSON.stringify({
+        APIKey: S.aisKey,
+        BoundingBoxes: bbox(),
+        FilterMessageTypes: ['PositionReport', 'ShipStaticData', 'StandardClassBPositionReport']
+      }));
+      setStatus('#st-sea', 'ok', 'SEA live');
+    };
+
+    ws.onmessage = (ev) => {
+      let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
+      if (m.error || m.Error) {
+        setStatus('#st-sea', 'err', 'SEA rejected');
+        toast('AIS stream error', String(m.error || m.Error), 'err');
+        manualStop = true; return;
+      }
+      handle(m);
+      if (++msgCount % 25 === 0) {
+        setStatus('#st-sea', 'ok', 'SEA ' + countSea() + ' vessels');
+        Dash.refreshThrottled();
+      }
+    };
+
+    ws.onerror = () => setStatus('#st-sea', 'err', 'SEA socket error');
+    ws.onclose = () => {
+      if (manualStop || !S.aisEnabled) { setStatus('#st-sea', 'idle', 'SEA off'); return; }
+      retry = clamp(retry + 1, 1, 6);
+      const wait = Math.pow(2, retry);
+      setStatus('#st-sea', 'warn', 'SEA retry ' + wait + 's');
+      clearTimeout(retryTimer);
+      retryTimer = setTimeout(connect, wait * 1000);
+    };
+  }
+
+  function handle(m) {
+    const md = m.MetaData || {}, type = m.MessageType, body = (m.Message || {})[type] || {};
+    const mmsi = md.MMSI || body.UserID;
+    if (!mmsi) return;
+    const id = 'S:' + mmsi;
+
+    if (type === 'ShipStaticData') {
+      const prev = targets.get(id);
+      const d = body.Dimension || {};
+      const loa = (Number(d.A) || 0) + (Number(d.B) || 0);
+      const beam = (Number(d.C) || 0) + (Number(d.D) || 0);
+      const rec = Object.assign({}, prev || {
+        id, domain: 'sea', lat: md.latitude, lon: md.longitude, hdg: 0,
+        sogKn: null, altFt: null, ts: nowSec(), demo: false, origin: null
+      });
+      rec.id = id; rec.domain = 'sea';
+      rec.name = (body.Name || md.ShipName || '').trim() || String(mmsi);
+      rec.sub = seaSubtype(body.Type);
+      rec.colour = seaColour(body.Type);
+      rec.dest = (body.Destination || '').trim().replace(/[@\s]+$/g, '') || null;
+      rec.meta = Object.assign({}, rec.meta, {
+        mmsi, imo: body.ImoNumber || null, callsign: (body.CallSign || '').trim() || null,
+        loa: loa || null, beam: beam || null,
+        draught: Number(body.MaximumStaticDraught) || null,
+        typeCode: body.Type == null ? null : body.Type,
+        eta: body.Eta ? [body.Eta.Month, body.Eta.Day, body.Eta.Hour, body.Eta.Minute] : null
+      });
+      if (!Number.isFinite(rec.lat)) { rec.lat = md.latitude; rec.lon = md.longitude; }
+      if (Number.isFinite(rec.lat)) upsert(rec);
+      return;
+    }
+
+    const lat = Number.isFinite(body.Latitude) ? body.Latitude : md.latitude;
+    const lon = Number.isFinite(body.Longitude) ? body.Longitude : md.longitude;
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+    const prev = targets.get(id);
+    const hdg = (Number.isFinite(body.TrueHeading) && body.TrueHeading < 360)
+      ? body.TrueHeading : (Number.isFinite(body.Cog) ? body.Cog : (prev ? prev.hdg : 0));
+    const rec = {
+      id, domain: 'sea',
+      name: (md.ShipName || '').trim() || (prev && prev.name) || String(mmsi),
+      sub: prev ? prev.sub : 'Unknown vessel',
+      colour: prev ? prev.colour : seaColour(null),
+      origin: prev ? prev.origin : null,
+      dest: prev ? prev.dest : null,
+      lat, lon, hdg,
+      sogKn: Number.isFinite(body.Sog) ? body.Sog : null,
+      altFt: null,
+      onGround: false,
+      ts: md.time_utc ? (Date.parse(md.time_utc.replace(' +0000 UTC', 'Z').replace(' ', 'T')) / 1000 || nowSec()) : nowSec(),
+      demo: false,
+      meta: Object.assign({}, prev && prev.meta, {
+        mmsi, navstat: navStatus(body.NavigationalStatus), cog: body.Cog
+      })
+    };
+    upsert(rec);
+  }
+
+  const NAV = ['Under way (engine)', 'At anchor', 'Not under command', 'Restricted manoeuvrability',
+    'Constrained by draught', 'Moored', 'Aground', 'Fishing', 'Under way (sailing)'];
+  const navStatus = (n) => (n == null ? null : (NAV[n] || 'Status ' + n));
+
+  function countSea() { let n = 0; targets.forEach(t => { if (t.domain === 'sea' && !t.demo) n++; }); return n; }
+  function disconnect(quiet) {
+    clearTimeout(retryTimer);
+    manualStop = true;
+    if (ws) { try { ws.onclose = null; ws.close(); } catch (e) {} ws = null; }
+    if (!quiet) setStatus('#st-sea', 'idle', 'SEA off');
+  }
+  return { connect, disconnect };
+})();
+
+/* -------------------------------------------------------------------------
+   6. Synthetic demo vessels — clearly flagged, opt-in only
+   ------------------------------------------------------------------------- */
+const Demo = (() => {
+  let timer = null;
+  const fleet = [];
+  const SPEC = [
+    ['DEMO PACIFIC DAWN', 70, 'Fremantle', 'Singapore', 229],
+    ['DEMO SWAN TRADER',  80, 'Kwinana',   'Port Hedland', 183],
+    ['DEMO ROTTNEST CAT', 60, 'Fremantle', 'Rottnest Island', 41],
+    ['DEMO SEA HARVEST',  30, 'Fremantle', 'Fishing grounds', 24],
+    ['DEMO TUG ARDROSS',  52, 'Fremantle', 'Kwinana', 32]
+  ];
+  function seed() {
+    fleet.length = 0;
+    const c = map.getCenter();
+    SPEC.forEach((s, i) => fleet.push({
+      name: s[0], type: s[1], from: s[2], to: s[3], loa: s[4],
+      lat: c.lat + (Math.random() - 0.5) * 1.2,
+      lon: c.lng + (Math.random() - 0.5) * 1.2,
+      hdg: Math.random() * 360, sog: 6 + Math.random() * 12, mmsi: 503900000 + i
+    }));
+  }
+  function tick() {
+    fleet.forEach(f => {
+      f.hdg = (f.hdg + (Math.random() - 0.5) * 6 + 360) % 360;
+      const d = (f.sog * 0.514444 * 3) / 111320;
+      f.lat += d * Math.cos(f.hdg * Math.PI / 180);
+      f.lon += d * Math.sin(f.hdg * Math.PI / 180) / Math.max(0.2, Math.cos(f.lat * Math.PI / 180));
+      upsert({
+        id: 'D:' + f.mmsi, domain: 'sea', name: f.name, sub: seaSubtype(f.type),
+        colour: seaColour(f.type), origin: f.from, dest: f.to,
+        lat: f.lat, lon: f.lon, hdg: f.hdg, sogKn: f.sog, altFt: null,
+        onGround: false, ts: nowSec(), demo: true,
+        meta: { mmsi: f.mmsi, loa: f.loa, beam: Math.round(f.loa / 6.5), typeCode: f.type,
+                navstat: 'Under way (engine)', draught: 6 + (f.loa / 40) }
+      });
+    });
+    Dash.refreshThrottled();
+  }
+  function start() { stop(); seed(); tick(); timer = setInterval(tick, 3000); }
+  function stop() {
+    clearInterval(timer); timer = null;
+    targets.forEach((t, id) => { if (t.demo) targets.delete(id); });
+    render(); Dash.refresh();
+  }
+  return { start, stop };
+})();
+
+/* -------------------------------------------------------------------------
+   7. Filtering
+   ------------------------------------------------------------------------- */
+const F = { q: '', domain: 'all', sub: 'all', origin: 'all', dest: 'all', ground: 'all' };
+
+function matches(t) {
+  if (F.domain !== 'all' && ((F.domain === 'air') !== (t.domain === 'air'))) return false;
+  if (F.sub !== 'all' && t.sub !== F.sub) return false;
+  if (F.origin !== 'all' && (t.origin || 'Unknown') !== F.origin) return false;
+  if (F.dest !== 'all' && (t.dest || 'Unknown') !== F.dest) return false;
+  if (F.ground === 'moving' && !(t.sogKn > 1) ) return false;
+  if (F.q) {
+    const hay = (t.name + ' ' + (t.meta.icao24 || '') + ' ' + (t.meta.mmsi || '') + ' ' +
+                 (t.meta.callsign || '') + ' ' + (t.origin || '') + ' ' + (t.dest || '')).toLowerCase();
+    if (hay.indexOf(F.q) === -1) return false;
+  }
+  return true;
+}
+function filtered() {
+  const out = [];
+  targets.forEach(t => { if (matches(t)) out.push(t); });
+  return out;
+}
+
+function rebuildFilterOptions() {
+  const subs = new Set(), origins = new Set(), dests = new Set();
+  targets.forEach(t => {
+    if (t.sub) subs.add(t.sub);
+    origins.add(t.origin || 'Unknown');
+    if (t.dest) dests.add(t.dest);
+  });
+  fillSelect('#f-subtype', subs, F.sub, 'All sub-types');
+  fillSelect('#f-origin', origins, F.origin, 'Any origin');
+  fillSelect('#f-dest', dests, F.dest, 'Any destination');
+}
+function fillSelect(sel, set, current, allLabel) {
+  const el = $(sel);
+  const vals = Array.from(set).sort((a, b) => a.localeCompare(b));
+  const sig = vals.join('|');
+  if (el.dataset.sig === sig) { el.value = current; return; }
+  el.dataset.sig = sig;
+  el.innerHTML = '';
+  const o0 = document.createElement('option'); o0.value = 'all'; o0.textContent = allLabel; el.appendChild(o0);
+  vals.forEach(v => { const o = document.createElement('option'); o.value = v; o.textContent = v; el.appendChild(o); });
+  el.value = set.has(current) ? current : 'all';
+  if (el.value === 'all' && current !== 'all') {
+    // the previously selected value disappeared from the feed
+    if (sel === '#f-subtype') F.sub = 'all';
+    if (sel === '#f-origin') F.origin = 'all';
+    if (sel === '#f-dest') F.dest = 'all';
+  }
+}
+
+/* -------------------------------------------------------------------------
+   8. Marker rendering (reused divIcon markers, CSS-rotated)
+   ------------------------------------------------------------------------- */
+const markers = new Map();   // id -> { m, el, colour, sel }
+
+const PLANE = 'M0,-11 L2.4,-4 L11,1.6 L11,4 L2.4,2.2 L2,8 L5.4,10.6 L5.4,12 L0,10.6 L-5.4,12 L-5.4,10.6 L-2,8 L-2.4,2.2 L-11,4 L-11,1.6 L-2.4,-4 Z';
+const SHIP  = 'M0,-12 L5,-3 L5,8 L2.6,12 L-2.6,12 L-5,8 L-5,-3 Z';
+
+function iconHtml(t, sel) {
+  const path = t.domain === 'air' ? PLANE : SHIP;
+  const scale = t.domain === 'air' ? 0.78 : 0.72;
+  const halo = sel ? '<circle class="halo" cx="0" cy="0" r="15"/>' : '';
+  return '<svg width="34" height="34" viewBox="-17 -17 34 34" style="transform:rotate(' + (t.hdg || 0) + 'deg)">' +
+    halo + '<g transform="scale(' + scale + ')"><path class="body" d="' + path + '" fill="' + t.colour + '"/></g></svg>';
+}
+
+function render() {
+  const list = filtered();
+  const c = map.getCenter();
+  const cap = clamp(Number(S.cap) || 900, 100, 6000);
+  if (list.length > cap) {
+    list.sort((a, b) => {
+      if (a.id === selectedId) return -1;
+      if (b.id === selectedId) return 1;
+      const da = (a.lat - c.lat) ** 2 + (a.lon - c.lng) ** 2;
+      const db = (b.lat - c.lat) ** 2 + (b.lon - c.lng) ** 2;
+      return da - db;
+    });
+  }
+  const shown = list.slice(0, cap);
+  const keep = new Set();
+
+  shown.forEach(t => {
+    keep.add(t.id);
+    const sel = t.id === selectedId;
+    let entry = markers.get(t.id);
+    if (!entry) {
+      const icon = L.divIcon({
+        className: 'veh' + (t.demo ? ' demo' : '') + (sel ? ' sel' : ''),
+        html: iconHtml(t, sel), iconSize: [34, 34], iconAnchor: [17, 17]
+      });
+      const m = L.marker([t.lat, t.lon], { icon, riseOnHover: true, keyboard: true,
+                                           title: t.name + ' · ' + t.sub });
+      m.on('click', () => select(t.id));
+      m.addTo(markerLayer);
+      entry = { m, hdg: t.hdg, colour: t.colour, sel };
+      markers.set(t.id, entry);
+    } else {
+      entry.m.setLatLng([t.lat, t.lon]);
+      if (entry.hdg !== t.hdg || entry.colour !== t.colour || entry.sel !== sel) {
+        entry.m.setIcon(L.divIcon({
+          className: 'veh' + (t.demo ? ' demo' : '') + (sel ? ' sel' : ''),
+          html: iconHtml(t, sel), iconSize: [34, 34], iconAnchor: [17, 17]
+        }));
+        entry.hdg = t.hdg; entry.colour = t.colour; entry.sel = sel;
+      }
+    }
+    if (sel && entry.m.isPopupOpen && entry.m.isPopupOpen()) entry.m.setPopupContent(popupHtml(t));
+  });
+
+  markers.forEach((entry, id) => {
+    if (!keep.has(id)) { markerLayer.removeLayer(entry.m); markers.delete(id); }
+  });
+
+  $('#f-count').textContent = shown.length.toLocaleString('en-AU') +
+    (list.length > shown.length ? ' of ' + list.length.toLocaleString('en-AU') + ' (capped)' : ' shown');
+  drawTracks();
+}
+
+function drawTracks() {
+  trackLayer.clearLayers();
+  const ids = new Set(tracked);
+  if (selectedId) ids.add(selectedId);
+  ids.forEach(id => {
+    const t = targets.get(id);
+    if (!t || t.history.length < 2) return;
+    const pts = t.history.map(h => [h[0], h[1]]);
+    const isSel = id === selectedId;
+    L.polyline(pts, {
+      color: isSel ? pal().orange : pal().blue,
+      weight: isSel ? 3 : 2, opacity: .9,
+      dashArray: isSel ? null : '4 4', interactive: false
+    }).addTo(trackLayer);
+    L.circleMarker(pts[0], { radius: 3, color: isSel ? pal().orange : pal().blue,
+      fillOpacity: 1, interactive: false }).addTo(trackLayer);
+  });
+  renderTrackList();
+}
+
+function renderTrackList() {
+  const box = $('#track-list');
+  if (!tracked.size) {
+    box.innerHTML = '<p class="empty">No breadcrumb tracks pinned. Open a vehicle pop-up and choose <em>Track</em>.</p>';
+    return;
+  }
+  box.innerHTML = '';
+  tracked.forEach(id => {
+    const t = targets.get(id);
+    const row = document.createElement('div');
+    row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid var(--ih-divider);';
+    const nm = document.createElement('span');
+    nm.style.cssText = 'font-family:var(--font-mono);font-size:13px;flex:1;';
+    nm.textContent = (t ? t.name : id) + ' · ' + (t ? t.history.length : 0) + ' pts';
+    const zoom = document.createElement('button');
+    zoom.className = 'btn'; zoom.style.padding = '2px 8px'; zoom.textContent = 'Zoom';
+    zoom.onclick = () => { if (t) map.setView([t.lat, t.lon], Math.max(map.getZoom(), 9)); };
+    const del = document.createElement('button');
+    del.className = 'btn'; del.style.padding = '2px 8px'; del.textContent = 'Clear';
+    del.onclick = () => { tracked.delete(id); drawTracks(); };
+    row.append(nm, zoom, del);
+    box.appendChild(row);
+  });
+}
+
+/* -------------------------------------------------------------------------
+   9. Selection + pop-up
+   ------------------------------------------------------------------------- */
+function popupHtml(t) {
+  const rows = [];
+  const add = (k, v) => { if (v !== null && v !== undefined && v !== '' && v !== '–')
+    rows.push('<dt>' + esc(k) + '</dt><dd>' + esc(v) + '</dd>'); };
+
+  if (t.domain === 'air') {
+    add('ICAO24', (t.meta.icao24 || '').toUpperCase());
+    add('Origin country', t.origin);
+    add('Altitude', t.altFt != null ? fmt(t.altFt, 0) + ' ft' : (t.onGround ? 'On ground' : null));
+    add('Ground speed', t.sogKn != null ? fmt(t.sogKn, 0) + ' kn' : null);
+    add('Track', fmt(t.hdg, 0) + '°');
+    add('Vertical rate', t.meta.vrate != null ? fmt(t.meta.vrate * 196.85, 0) + ' ft/min' : null);
+    add('Squawk', t.meta.squawk);
+    add('Position source', t.meta.src);
+  } else {
+    add('MMSI', t.meta.mmsi);
+    add('IMO', t.meta.imo);
+    add('Call sign', t.meta.callsign);
+    add('Speed', t.sogKn != null ? fmt(t.sogKn, 1) + ' kn' : null);
+    add('Heading', fmt(t.hdg, 0) + '°');
+    add('Nav status', t.meta.navstat);
+    add('Departure', t.origin);
+    add('Destination', t.dest);
+    add('LOA × beam', t.meta.loa ? fmt(t.meta.loa, 0) + ' × ' + fmt(t.meta.beam, 0) + ' m' : null);
+    add('Draught', t.meta.draught ? fmt(t.meta.draught, 1) + ' m' : null);
+  }
+  add('Position', t.lat.toFixed(5) + ', ' + t.lon.toFixed(5));
+  add('Last report', new Date(t.ts * 1000).toLocaleTimeString('en-AU'));
+
+  const isTracked = tracked.has(t.id);
+  return '<div class="pop">' +
+    '<h3>' + esc(t.name) + (t.demo ? ' <span class="badge demo">DEMO — synthetic</span>' : '') + '</h3>' +
+    '<div class="sub">' + esc(t.sub) + ' · ' + (t.domain === 'air' ? 'AIRCRAFT' : 'VESSEL') + '</div>' +
+    '<dl>' + rows.join('') + '</dl>' +
+    '<div class="acts">' +
+      '<button class="btn ' + (isTracked ? 'accent' : '') + '" data-act="track" data-id="' + esc(t.id) + '">' +
+        (isTracked ? 'Stop tracking' : 'Track breadcrumbs') + '</button>' +
+      '<button class="btn" data-act="follow" data-id="' + esc(t.id) + '">Centre</button>' +
+    '</div></div>';
+}
+
+function select(id) {
+  selectedId = id;
+  const t = targets.get(id);
+  if (!t) return;
+  const entry = markers.get(id);
+  if (entry) entry.m.bindPopup(popupHtml(t), { autoPan: true, maxWidth: 340 }).openPopup();
+  render();
+}
+map.on('popupclose', () => { selectedId = null; render(); });
+
+document.addEventListener('click', (e) => {
+  const b = e.target.closest('button[data-act]');
+  if (!b) return;
+  const id = b.dataset.id, t = targets.get(id);
+  if (b.dataset.act === 'track') {
+    if (tracked.has(id)) tracked.delete(id); else tracked.add(id);
+    if (t) { const m = markers.get(id); if (m) m.m.setPopupContent(popupHtml(t)); }
+    drawTracks();
+  } else if (b.dataset.act === 'follow' && t) {
+    map.setView([t.lat, t.lon], Math.max(map.getZoom(), 10));
+  }
+});
+
+/* -------------------------------------------------------------------------
+   10. Dashboard analytics (Chart.js)
+   ------------------------------------------------------------------------- */
+const Dash = (() => {
+  let cCat = null, cSub = null, cLoa = null, pending = false;
+
+  function chartColours() {
+    const p = pal();
+    return [p.blue, p.orange, p.green, p.steel, p.ochre, p.brick];
+  }
+  function baseOpts(horizontal) {
+    const grid = getComputedStyle(document.documentElement).getPropertyValue('--ih-divider').trim();
+    const text = getComputedStyle(document.documentElement).getPropertyValue('--ih-text').trim();
+    return {
+      responsive: true, maintainAspectRatio: false,
+      indexAxis: horizontal ? 'y' : 'x',
+      animation: { duration: 200 },
+      plugins: {
+        legend: { display: false },
+        tooltip: { backgroundColor: getComputedStyle(document.documentElement).getPropertyValue('--ih-surface-alt').trim(),
+                   titleColor: text, bodyColor: text, borderColor: grid, borderWidth: 1 }
+      },
+      scales: {
+        x: { ticks: { color: text, font: { family: 'IBM Plex Mono', size: 11 } }, grid: { color: grid } },
+        y: { ticks: { color: text, font: { family: 'IBM Plex Sans', size: 11 } }, grid: { color: grid } }
+      }
+    };
+  }
+
+  function build() {
+    if (typeof Chart === 'undefined') return;
+    const text = getComputedStyle(document.documentElement).getPropertyValue('--ih-text').trim();
+    cCat = new Chart($('#c-cat'), {
+      type: 'doughnut',
+      data: { labels: ['Aircraft', 'Vessels'], datasets: [{ data: [0, 0], backgroundColor: chartColours().slice(0, 2), borderWidth: 0 }] },
+      options: { responsive: true, maintainAspectRatio: false, cutout: '58%',
+        plugins: { legend: { position: 'bottom', labels: { color: text, boxWidth: 12, font: { family: 'IBM Plex Sans', size: 12 } } } } }
+    });
+    cSub = new Chart($('#c-sub'), {
+      type: 'bar',
+      data: { labels: [], datasets: [{ data: [], backgroundColor: pal().blue, borderWidth: 0 }] },
+      options: baseOpts(true)
+    });
+    cLoa = new Chart($('#c-loa'), {
+      type: 'bar',
+      data: { labels: [], datasets: [{ data: [], backgroundColor: pal().orange, borderWidth: 0 }] },
+      options: baseOpts(false)
+    });
+  }
+
+  function refresh() {
+    const list = filtered();
+    let air = 0, sea = 0, spdSum = 0, spdN = 0, maxAlt = null, airborne = 0, onGround = 0;
+    const subs = new Map(), origins = new Map(), dests = new Map(), loas = [];
+
+    list.forEach(t => {
+      if (t.domain === 'air') { air++; if (t.onGround) onGround++; else airborne++; } else sea++;
+      if (t.sogKn != null) { spdSum += t.sogKn; spdN++; }
+      if (t.altFt != null && (maxAlt === null || t.altFt > maxAlt)) maxAlt = t.altFt;
+      subs.set(t.sub, (subs.get(t.sub) || 0) + 1);
+      const o = t.origin || 'Unknown'; origins.set(o, (origins.get(o) || 0) + 1);
+      if (t.dest) dests.set(t.dest, (dests.get(t.dest) || 0) + 1);
+      if (t.meta && t.meta.loa) loas.push(t.meta.loa);
+    });
+
+    $('#m-air').textContent = air.toLocaleString('en-AU');
+    $('#m-sea').textContent = sea.toLocaleString('en-AU');
+    $('#m-spd').innerHTML = (spdN ? fmt(spdSum / spdN, 0) : '–') + '<span class="u"> kn</span>';
+    $('#m-alt').innerHTML = (maxAlt != null ? Math.round(maxAlt).toLocaleString('en-AU') : '–') + '<span class="u"> ft</span>';
+    $('#m-airborne').textContent = airborne + ' / ' + onGround;
+    loas.sort((a, b) => a - b);
+    $('#m-loa').innerHTML = (loas.length ? fmt(loas[Math.floor(loas.length / 2)], 0) : '–') + '<span class="u"> m</span>';
+
+    if (cCat) { cCat.data.datasets[0].data = [air, sea];
+                cCat.data.datasets[0].backgroundColor = chartColours().slice(0, 2); cCat.update(); }
+
+    if (cSub) {
+      const top = Array.from(subs.entries()).sort((a, b) => b[1] - a[1]).slice(0, 8);
+      cSub.data.labels = top.map(r => r[0]);
+      cSub.data.datasets[0].data = top.map(r => r[1]);
+      cSub.data.datasets[0].backgroundColor = top.map((r, i) => i === 0 ? pal().orange : pal().blue);
+      cSub.options = baseOpts(true); cSub.update();
+    }
+
+    if (cLoa) {
+      const bins = [[0, 25], [25, 50], [50, 100], [100, 150], [150, 250], [250, 1000]];
+      const counts = bins.map(b => loas.filter(v => v >= b[0] && v < b[1]).length);
+      cLoa.data.labels = bins.map(b => b[0] + '–' + (b[1] === 1000 ? '250+' : b[1]) + ' m');
+      cLoa.data.datasets[0].data = counts;
+      cLoa.data.datasets[0].backgroundColor = pal().orange;
+      cLoa.options = baseOpts(false); cLoa.update();
+      $('#loa-note').textContent = loas.length
+        ? loas.length + ' vessels reporting dimensions.'
+        : 'No AIS static data received yet — dimensions arrive with ShipStaticData messages (up to 6-minute cadence).';
+    }
+
+    rankTable('#t-origin', origins);
+    rankTable('#t-dest', dests, 'No AIS voyage destinations received yet.');
+    rebuildFilterOptions();
+  }
+
+  function rankTable(sel, mapObj, emptyMsg) {
+    const tb = $(sel); tb.innerHTML = '';
+    const rows = Array.from(mapObj.entries()).sort((a, b) => b[1] - a[1]).slice(0, 8);
+    if (!rows.length) {
+      const tr = document.createElement('tr'), td = document.createElement('td');
+      td.colSpan = 2; td.className = 'empty'; td.textContent = emptyMsg || 'No data yet.';
+      tr.appendChild(td); tb.appendChild(tr); return;
+    }
+    rows.forEach(r => {
+      const tr = document.createElement('tr');
+      const a = document.createElement('td'); a.textContent = r[0];
+      const b = document.createElement('td'); b.className = 'n'; b.textContent = r[1].toLocaleString('en-AU');
+      tr.append(a, b); tb.appendChild(tr);
+    });
+  }
+
+  function refreshThrottled() {
+    if (pending) return;
+    pending = true;
+    setTimeout(() => { pending = false; refresh(); render(); }, 1200);
+  }
+  function rebuildTheme() { [cCat, cSub, cLoa].forEach(c => { if (c) c.destroy(); }); build(); refresh(); }
+  return { build, refresh, refreshThrottled, rebuildTheme };
+})();
+
+/* -------------------------------------------------------------------------
+   11. UI wiring
+   ------------------------------------------------------------------------- */
+function applyTheme(t) {
+  document.documentElement.dataset.theme = t;
+  S.theme = t; saveSettings();
+  drawLegend();
+  // recolour existing targets
+  targets.forEach(x => {
+    x.colour = x.domain === 'air' ? airColour(x) : seaColour(x.meta ? x.meta.typeCode : null);
+  });
+  markers.forEach(e => { e.colour = null; });
+  render();
+  Dash.rebuildTheme();
+}
+
+function bindSettings() {
+  const map2 = [
+    ['#os-id', 'osId', 'value'], ['#os-secret', 'osSecret', 'value'],
+    ['#os-interval', 'osInterval', 'number'], ['#os-bbox', 'osBbox', 'checked'],
+    ['#os-enabled', 'osEnabled', 'checked'], ['#os-proxy', 'osProxy', 'value'],
+    ['#ais-key', 'aisKey', 'value'], ['#ais-viewport', 'aisViewport', 'checked'],
+    ['#ais-enabled', 'aisEnabled', 'checked'],
+    ['#cap', 'cap', 'number'], ['#stale', 'stale', 'number'],
+    ['#trail', 'trail', 'number'], ['#demo', 'demo', 'checked']
+  ];
+  map2.forEach(([sel, key, kind]) => {
+    const el = $(sel);
+    if (kind === 'checked') el.checked = !!S[key]; else el.value = S[key];
+    el.addEventListener('change', () => {
+      S[key] = kind === 'checked' ? el.checked : (kind === 'number' ? Number(el.value) : el.value.trim());
+      saveSettings();
+      if (key === 'osEnabled') S.osEnabled ? OpenSky.reset() : OpenSky.stop();
+      if (['osId', 'osSecret', 'osInterval', 'osBbox', 'osProxy'].indexOf(key) > -1) OpenSky.reset();
+      if (key === 'aisEnabled') S.aisEnabled ? AIS.connect() : AIS.disconnect();
+      if (key === 'aisKey' && S.aisEnabled) AIS.connect();
+      if (key === 'demo') S.demo ? Demo.start() : Demo.stop();
+      if (key === 'cap' || key === 'trail') render();
+    });
+  });
+}
+
+function bindFilters() {
+  let qTimer = null;
+  $('#q').addEventListener('input', (e) => {
+    clearTimeout(qTimer);
+    qTimer = setTimeout(() => { F.q = e.target.value.trim().toLowerCase(); render(); Dash.refresh(); }, 180);
+  });
+  const wire = (sel, key) => $(sel).addEventListener('change', e => { F[key] = e.target.value; render(); Dash.refresh(); });
+  wire('#f-domain', 'domain'); wire('#f-subtype', 'sub');
+  wire('#f-origin', 'origin'); wire('#f-dest', 'dest'); wire('#f-ground', 'ground');
+  $('#btn-clear').addEventListener('click', () => {
+    F.q = ''; F.domain = 'all'; F.sub = 'all'; F.origin = 'all'; F.dest = 'all'; F.ground = 'all';
+    $('#q').value = ''; ['#f-domain', '#f-subtype', '#f-origin', '#f-dest', '#f-ground'].forEach(s => $(s).value = 'all');
+    render(); Dash.refresh();
+  });
+  $('#btn-filters').addEventListener('click', () => {
+    const p = $('#filters'), open = !p.classList.toggle('collapsed');
+    $('#btn-filters').setAttribute('aria-expanded', String(open));
+  });
+}
+
+function bindChrome() {
+  $('#btn-theme').addEventListener('click', () =>
+    applyTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'));
+
+  $('#btn-sidebar').addEventListener('click', () => {
+    const on = !$('#stage').classList.contains('with-sidebar');
+    $('#stage').classList.toggle('with-sidebar', on);
+    $('#btn-sidebar').setAttribute('aria-pressed', String(on));
+    S.sidebar = on; saveSettings();
+    setTimeout(() => map.invalidateSize(), 200);
+  });
+
+  $('#btn-settings').addEventListener('click', () => {
+    const d = $('#drawer'); const open = d.dataset.open !== 'true';
+    d.dataset.open = String(open);
+    if (open) $('#os-id').focus();
+  });
+  $('#btn-close-settings').addEventListener('click', () => { $('#drawer').dataset.open = 'false'; });
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') $('#drawer').dataset.open = 'false';
+    if (e.key === '/' && document.activeElement !== $('#q')) { e.preventDefault(); $('#q').focus(); }
+  });
+
+  $('#btn-refresh').addEventListener('click', () => OpenSky.reset());
+  $('#btn-ais-reconnect').addEventListener('click', () => { S.aisEnabled = true; $('#ais-enabled').checked = true; saveSettings(); AIS.connect(); });
+  $('#btn-ais-stop').addEventListener('click', () => { S.aisEnabled = false; $('#ais-enabled').checked = false; saveSettings(); AIS.disconnect(); });
+
+  $('#legend').addEventListener('click', () => $('#legend').classList.toggle('collapsed'));
+
+  let moveTimer = null;
+  map.on('moveend', () => {
+    clearTimeout(moveTimer);
+    moveTimer = setTimeout(() => { render(); if (S.osBbox && S.osEnabled) OpenSky.poll(); }, 500);
+  });
+}
+
+/* -------------------------------------------------------------------------
+   12. Boot
+   ------------------------------------------------------------------------- */
+(function init() {
+  document.documentElement.dataset.theme = S.theme || 'dark';
+  $('#stage').classList.toggle('with-sidebar', S.sidebar !== false);
+  $('#btn-sidebar').setAttribute('aria-pressed', String(S.sidebar !== false));
+
+  drawLegend();
+  bindSettings();
+  bindFilters();
+  bindChrome();
+  Dash.build();
+  Dash.refresh();
+
+  setInterval(() => { const n = pruneStale(); if (n) { render(); Dash.refresh(); } }, 30000);
+  setInterval(() => render(), 5000);
+
+  if (S.osEnabled) OpenSky.start(); else setStatus('#st-air', 'idle', 'AIR off');
+  if (S.aisEnabled) AIS.connect(); else setStatus('#st-sea', 'idle', 'SEA off');
+  if (S.demo) Demo.start();
+
+  if (!S.aisKey && !S.demo) {
+    toast('Marine feed not configured', 'Add a free aisstream.io API key in Settings to enable live vessel tracking. Air traffic runs without a key, at reduced anonymous rate limits.');
+  }
+  setTimeout(() => map.invalidateSize(), 300);
+})();
+</script>
+</body>
+</html>
