@@ -438,9 +438,9 @@ html[data-theme="light"] .veh .body{stroke:rgba(255,255,255,.9);}
       <div class="row">
         <label for="air-provider">Data source</label>
         <select id="air-provider">
-          <option value="adsblol">adsb.lol — no key, no relay (recommended)</option>
-          <option value="adsbfi">adsb.fi — no key (alternative)</option>
-          <option value="airplaneslive">airplanes.live — no key (alternative)</option>
+          <option value="airplaneslive">airplanes.live — no key, no relay (recommended)</option>
+          <option value="adsblol">adsb.lol — needs the relay, rate-limits heavily</option>
+          <option value="adsbfi">adsb.fi — refuses relay traffic (HTTP 403)</option>
           <option value="opensky">OpenSky Network — requires the relay below</option>
         </select>
         <span class="hint" id="air-provider-hint"></span>
@@ -511,6 +511,11 @@ html[data-theme="light"] .veh .body{stroke:rgba(255,255,255,.9);}
       </div>
     </fieldset>
 
+    <div class="callout warn">
+      <strong>AISStream has a known "silent socket" issue</strong>
+      Public reports (aisstream/aisstream issue #15) describe exactly this: the connection opens, the subscription is accepted, and zero frames ever arrive — reproduced even with an empty API key, so it is not specific to any one account. If your log shows the same pattern, the key is very likely fine and the fault is upstream. Keep the socket enabled — it may recover without any change here — and use <em>VesselAPI spot check</em> or <em>demo vessels</em> below in the meantime.
+    </div>
+
     <fieldset>
       <legend>Marine traffic — AISStream.io</legend>
       <div class="row">
@@ -530,6 +535,20 @@ html[data-theme="light"] .veh .body{stroke:rgba(255,255,255,.9);}
         <button class="btn primary" id="btn-ais-reconnect">Re-subscribe to view</button>
         <button class="btn" id="btn-ais-stop">Disconnect</button>
       </div>
+    </fieldset>
+
+    <fieldset>
+      <legend>Marine traffic — VesselAPI (manual spot check)</legend>
+      <p class="hint" style="margin:0 0 10px;">A REST alternative for when AISStream is silent. Its free tier is capped at 150 calls per month, so this is deliberately <strong>manual only</strong> — there is no automatic polling, and each button press spends one call. Sign up at <a href="https://dashboard.vesselapi.com" target="_blank" rel="noopener">dashboard.vesselapi.com</a> for a free key.</p>
+      <div class="row">
+        <label for="vessel-key">API key</label>
+        <input id="vessel-key" type="password" autocomplete="off" spellcheck="false" placeholder="VesselAPI bearer token">
+      </div>
+      <div class="row" style="flex-direction:row;gap:8px;align-items:center;">
+        <button class="btn primary" id="btn-vessel-fetch">Fetch vessels near map centre (1 call)</button>
+        <span class="mono" id="vessel-quota-note" style="color:var(--ih-text-secondary);">0 calls used this session</span>
+      </div>
+      <span class="hint" id="vessel-msg">The query area is capped by VesselAPI at 4° combined width/height, so this zooms to roughly your current view, not the whole map.</span>
     </fieldset>
 
     <fieldset>
@@ -588,7 +607,7 @@ html[data-theme="light"] .veh .body{stroke:rgba(255,255,255,.9);}
    ------------------------------------------------------------------------- */
 /* Build identity. Bump APP_VERSION on every deploy so the running page can be
    distinguished from a cached one. */
-const APP_VERSION = '1.8.0';
+const APP_VERSION = '2.0.0';
 const APP_BUILD   = '2026-08-01';
 
 const $  = (s, r = document) => r.querySelector(s);
@@ -618,12 +637,24 @@ const Store = (() => {
 const KEY = 'stm.settings.v1';
 const DEFAULTS = {
   osId: '', osSecret: '', osInterval: 15, osBbox: true, osEnabled: true, osProxy: '',
-  airProvider: 'adsblol', adsbViaRelay: false,
-  aisKey: '', aisViewport: true, aisEnabled: false,
+  airProvider: 'airplaneslive', adsbViaRelay: false,
+  aisKey: '', aisViewport: true, aisEnabled: false, vesselApiKey: '',
   cap: 900, stale: 180, trail: 240, demo: false,
   theme: 'dark', sidebar: true, basemap: 'Dark Matter'
 };
 let S = Object.assign({}, DEFAULTS, Store.get(KEY, {}));
+
+/* adsb.lol was the original default but rate-limits shared relay IPs and sends
+   no usable CORS header; airplanes.live does both correctly. Move existing
+   installs across once, without overriding a deliberate later choice. */
+if (!S.providerMigrated) {
+  if (S.airProvider === 'adsblol' || S.airProvider === 'adsbfi') {
+    S.airProvider = 'airplaneslive';
+    S.adsbViaRelay = false;
+  }
+  S.providerMigrated = true;
+  Store.set(KEY, S);
+}
 const saveSettings = () => Store.set(KEY, S);
 
 function toast(title, msg, kind) {
@@ -996,11 +1027,11 @@ const OpenSky = (() => {
         // configured and reachable, route through it rather than giving up:
         // the block is local to this browser, not to the endpoint.
         if (!(e instanceof TypeError) || !S.osProxy) throw e;
-        Log.add('air', 'Direct request to ' + provider.label + ' was blocked locally. Retrying through the relay…');
+        Log.add('air', 'Direct request to ' + provider.label + ' failed at the network layer (no CORS header, or a local filter). Retrying through the relay…');
         res = await fetch(viaRelay(url), { cache: 'no-store' });
         S.adsbViaRelay = true; saveSettings();
         $('#adsb-relay').checked = true;
-        Log.add('air', 'Relay route succeeded. ADS-B will now go through the relay automatically — something on this machine or network blocks ' + provider.label + ' directly.');
+        Log.add('air', 'Relay route succeeded, so ADS-B will use it for ' + provider.label + '. Note this source may rate-limit the shared relay address; airplanes.live works directly and avoids the problem entirely.');
       }
     }
     if (!res.ok) {
@@ -1158,8 +1189,9 @@ const AIS = (() => {
         if (!posCount) {
           Log.add('sea', 'No position reports after 25 s. Total messages of any type received: ' + msgCount + '. ' +
             (msgCount === 0
-              ? 'Zero messages at all — the subscription was accepted but matched nothing. Untick "Subscribe to the current map view" and press Re-subscribe to test globally; if that also returns nothing, the key is not active yet.'
+              ? 'Zero messages at all — the subscription was accepted but matched nothing. This matches a known upstream issue (aisstream/aisstream #15) rather than a problem with your key. See the note in Settings for the demo-vessel workaround.'
               : 'Non-position messages are arriving, so the key works — this bounding box simply has no vessels reporting.'));
+          if (msgCount === 0) maybeOfferDemo();
           setStatus('#st-sea', 'warn', 'SEA no traffic');
           toast('Marine feed silent', 'Connected, but no vessels in this bounding box after 25 seconds. See Diagnostics.', 'warn');
         }
@@ -1285,23 +1317,107 @@ const AIS = (() => {
 /* -------------------------------------------------------------------------
    6. Synthetic demo vessels — clearly flagged, opt-in only
    ------------------------------------------------------------------------- */
+/* VesselAPI — a manual REST spot check for when AISStream is silent.
+   Deliberately not polled: the free tier is 150 calls/month. */
+const VesselApi = (() => {
+  let calls = 0;
+  function ingest(json) {
+    const rows = json.data || json.vessels || [];
+    const now = nowSec();
+    let kept = 0;
+    rows.forEach(v => {
+      const lat = Number(v.latitude), lon = Number(v.longitude);
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+      const typeCode = Number.isFinite(v.shipType) ? v.shipType : null;
+      const rec = {
+        id: 'V:' + (v.mmsi || v.imo || (lat.toFixed(3) + ',' + lon.toFixed(3))),
+        domain: 'sea',
+        name: (v.vesselName || '').trim() || String(v.mmsi || v.imo || 'Unknown vessel'),
+        sub: seaSubtype(typeCode), colour: seaColour(typeCode),
+        origin: null, dest: (v.destination || '').trim() || null,
+        lat, lon, hdg: Number.isFinite(v.heading) ? v.heading : (Number.isFinite(v.cog) ? v.cog : 0),
+        sogKn: Number.isFinite(v.sog) ? v.sog : null, altFt: null, onGround: false,
+        ts: v.timestamp ? (Date.parse(v.timestamp) / 1000 || now) : now,
+        demo: false,
+        meta: { mmsi: v.mmsi, imo: v.imo, navstat: v.navStatus || null, typeCode, source: 'VesselAPI' }
+      };
+      upsert(rec); kept++;
+    });
+    return kept;
+  }
+
+  async function fetchNow() {
+    const btn = $('#btn-vessel-fetch');
+    const msg = $('#vessel-msg');
+    const key = S.vesselApiKey;
+    if (!key) { msg.textContent = 'Enter a VesselAPI key first.'; msg.style.color = 'var(--ih-error-strong)'; return; }
+    const b = map.getBounds();
+    // Clamp to the documented 4-degree combined span so the request doesn't
+    // simply fail on a wide view.
+    const c = map.getCenter();
+    let dLat = Math.min(b.getNorth() - b.getSouth(), 3.5);
+    let dLon = Math.min(b.getEast() - b.getWest(), 3.5 - dLat > 0 ? 3.5 - dLat : 0.5);
+    const latBottom = c.lat - dLat / 2, latTop = c.lat + dLat / 2;
+    const lonLeft = c.lng - dLon / 2, lonRight = c.lng + dLon / 2;
+    const qs = new URLSearchParams({
+      'filter.latBottom': latBottom.toFixed(4), 'filter.latTop': latTop.toFixed(4),
+      'filter.lonLeft': lonLeft.toFixed(4), 'filter.lonRight': lonRight.toFixed(4)
+    });
+    const target = 'https://api.vesselapi.com/v1/location/vessels/bounding-box?' + qs.toString();
+    const url = S.osProxy ? S.osProxy + encodeURIComponent(target) : target;
+
+    btn.disabled = true; btn.textContent = 'Fetching…';
+    try {
+      const res = await fetch(url, { headers: { Authorization: 'Bearer ' + key } });
+      const body = await res.json().catch(() => null);
+      if (!res.ok) {
+        const detail = body && (body.message || body.error) ? ': ' + (body.message || body.error) : '';
+        msg.style.color = 'var(--ih-error-strong)';
+        msg.textContent = 'HTTP ' + res.status + detail +
+          (res.status === 401 ? ' — check the key.' : res.status === 429 ? ' — monthly quota reached.' : '');
+        Log.add('sea', 'VesselAPI fetch failed: HTTP ' + res.status + detail);
+      } else {
+        const kept = ingest(body || {});
+        calls++;
+        $('#vessel-quota-note').textContent = calls + ' call' + (calls === 1 ? '' : 's') + ' used this session';
+        msg.style.color = 'var(--ih-success-strong)';
+        msg.textContent = kept + ' vessel(s) returned for this view.' + (kept === 0 ? ' Try a busier port area.' : '');
+        Log.add('sea', 'VesselAPI: ' + kept + ' vessels for bbox ' + latBottom.toFixed(2) + ',' + lonLeft.toFixed(2) +
+          ' → ' + latTop.toFixed(2) + ',' + lonRight.toFixed(2) + '.');
+        render(); Dash.refresh();
+      }
+    } catch (e) {
+      msg.style.color = 'var(--ih-error-strong)';
+      msg.textContent = 'Request failed: ' + e.message + (e instanceof TypeError ? ' — likely needs the relay; paste one in the Air traffic section.' : '');
+      Log.add('sea', 'VesselAPI fetch failed: ' + e.message);
+    } finally {
+      btn.disabled = false; btn.textContent = 'Fetch vessels near map centre (1 call)';
+    }
+  }
+  return { fetchNow };
+})();
+
 const Demo = (() => {
   let timer = null;
   const fleet = [];
   const SPEC = [
     ['DEMO PACIFIC DAWN', 70, 'Fremantle', 'Singapore', 229],
     ['DEMO SWAN TRADER',  80, 'Kwinana',   'Port Hedland', 183],
+    ['DEMO IRON HORIZON', 89, 'Port Hedland', 'Qingdao', 292],
     ['DEMO ROTTNEST CAT', 60, 'Fremantle', 'Rottnest Island', 41],
     ['DEMO SEA HARVEST',  30, 'Fremantle', 'Fishing grounds', 24],
-    ['DEMO TUG ARDROSS',  52, 'Fremantle', 'Kwinana', 32]
+    ['DEMO TUG ARDROSS',  52, 'Fremantle', 'Kwinana', 32],
+    ['DEMO COASTAL RANGER', 37, 'Fremantle', 'Bunbury', 68]
   ];
   function seed() {
     fleet.length = 0;
     const c = map.getCenter();
     SPEC.forEach((s, i) => fleet.push({
       name: s[0], type: s[1], from: s[2], to: s[3], loa: s[4],
-      lat: c.lat + (Math.random() - 0.5) * 1.2,
-      lon: c.lng + (Math.random() - 0.5) * 1.2,
+      // Bias toward the coast (west of centre) rather than a uniform scatter,
+      // so the fleet looks like shipping lanes rather than random noise.
+      lat: c.lat + (Math.random() - 0.5) * 1.4,
+      lon: c.lng - Math.random() * 0.8,
       hdg: Math.random() * 360, sog: 6 + Math.random() * 12, mmsi: 503900000 + i
     }));
   }
@@ -1330,6 +1446,20 @@ const Demo = (() => {
   }
   return { start, stop };
 })();
+
+/* When AISStream is producing nothing after 45 s and the person hasn't already
+   made a marine choice, offer the demo fleet rather than leaving the map bare
+   with no way forward short of reading Settings. Offered once per session. */
+let demoOffered = false;
+function maybeOfferDemo() {
+  if (demoOffered || S.demo) return;
+  let seaCount = 0; targets.forEach(t => { if (t.domain === 'sea' && !t.demo) seaCount++; });
+  if (seaCount > 0) return;
+  demoOffered = true;
+  toast('No live marine data yet',
+    'AISStream appears to be affected by a known upstream issue. Settings → Display & performance → "Enable synthetic demo vessels" puts a labelled, clearly-marked fleet on the map so the UI has something to show while it recovers.',
+    'warn');
+}
 
 /* -------------------------------------------------------------------------
    7. Filtering
@@ -1714,6 +1844,7 @@ function bindSettings() {
     ['#os-enabled', 'osEnabled', 'checked'], ['#adsb-relay', 'adsbViaRelay', 'checked'],
     ['#ais-key', 'aisKey', 'value'], ['#ais-viewport', 'aisViewport', 'checked'],
     ['#ais-enabled', 'aisEnabled', 'checked'],
+    ['#vessel-key', 'vesselApiKey', 'value'],
     ['#cap', 'cap', 'number'], ['#stale', 'stale', 'number'],
     ['#trail', 'trail', 'number'], ['#demo', 'demo', 'checked']
   ];
@@ -1768,7 +1899,8 @@ async function runDiagnostics() {
       if (r.ok) {
         const j = await r.json();
         Log.add('diag', 'STEP 0 ' + prov.label + ': OK, HTTP ' + r.status + ', ' + ((j.ac || []).length) +
-          ' aircraft near Zurich, ' + ms + ' ms. This source needs no relay — select it as the air source.');
+          ' aircraft near Zurich, ' + ms + ' ms — reachable directly, no relay needed.' +
+          (key === S.airProvider ? '' : ' Consider selecting this as the air source.'));
       } else {
         Log.add('diag', 'STEP 0 ' + prov.label + ': HTTP ' + r.status + ' ' + r.statusText + '.');
       }
@@ -1815,7 +1947,8 @@ async function runDiagnostics() {
             'If the direct test above failed but this succeeded, the block is on this machine — tick "Route ADS-B through the relay".');
         } else {
           Log.add('diag', 'STEP 0r ' + prov.label + ' via relay: HTTP ' + r.status +
-            (r.status === 403 ? ' — the relay is running an older worker.js that does not allow this host. Redeploy it.' : '.'));
+            (r.status === 403 ? ' — either the relay disallows this host (redeploy worker.js), or the upstream itself refused the relay address. Since other hosts succeed through the same relay, the latter is more likely.'
+             : r.status === 429 ? ' — the upstream is rate-limiting the shared relay address, not you.' : '.'));
         }
       } catch (e) {
         Log.add('diag', 'STEP 0r ' + prov.label + ' via relay: FAILED (' + e.message + ').');
@@ -2057,9 +2190,9 @@ function bindChrome() {
 
   const provSel = $('#air-provider');
   const PROV_HINT = {
-    adsblol: 'Community ADS-B aggregator. No key, no relay, permissive CORS. Queries a radius around the map centre, capped at 250 nm.',
-    adsbfi:  'Alternative community aggregator with the same query shape. Try this if adsb.lol is rate-limiting or has no feeders near you.',
-    airplaneslive: 'Third community aggregator. Feeder coverage differs between all three — run diagnostics to compare counts for your area.',
+    adsblol: 'Sends no usable CORS header, so it needs the relay — and then rate-limits the shared relay address with HTTP 429. Not recommended.',
+    adsbfi:  'Returns HTTP 403 to relay traffic and sends no CORS header for direct calls. Kept only for completeness.',
+    airplaneslive: 'Works directly from the browser — proper CORS headers, no key, no relay. Good global feeder coverage including Australia.',
     opensky: 'Requires a working relay — OpenSky sends no usable CORS header to a browser, and its hosts have been timing out from Cloudflare.'
   };
   function applyProvider() {
@@ -2073,7 +2206,12 @@ function bindChrome() {
     });
   }
   provSel.addEventListener('change', () => {
-    S.airProvider = provSel.value; saveSettings();
+    S.airProvider = provSel.value;
+    // Whether a relay is needed depends entirely on the endpoint, so a route
+    // learned for one source must not be carried over to the next.
+    S.adsbViaRelay = false;
+    $('#adsb-relay').checked = false;
+    saveSettings();
     applyProvider();
     targets.forEach((t, id) => { if (t.domain === 'air') targets.delete(id); });
     render(); Dash.refresh();
@@ -2093,6 +2231,7 @@ function bindChrome() {
   relayInput.addEventListener('input', relaySync);
   relayInput.addEventListener('blur', () => { relayInput.value = normaliseRelay(relayInput.value); relaySync(); });
   $('#btn-relay-test').addEventListener('click', testRelay);
+  $('#btn-vessel-fetch').addEventListener('click', () => VesselApi.fetchNow());
   $('#btn-relay-clear').addEventListener('click', () => {
     relayInput.value = ''; S.osProxy = ''; saveSettings();
     setRelayState('err', 'not set', 'Cleared.');
