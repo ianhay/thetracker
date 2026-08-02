@@ -191,6 +191,7 @@ legend{font-family:var(--font-head);font-size:17px;font-weight:600;padding:0 6px
 .callout.warn{border-left-color:var(--ih-accent);}
 .callout strong{display:block;font-family:var(--font-head);font-size:15px;letter-spacing:.2px;margin-bottom:2px;}
 a{color:var(--ih-primary);}
+.opensky-only[hidden]{display:none;}
 #diaglog{
   margin:0;background:var(--ih-code-bg);color:var(--ih-code-text);
   border:1px solid var(--ih-border);border-radius:var(--r);
@@ -435,6 +436,17 @@ html[data-theme="light"] .veh .body{stroke:rgba(255,255,255,.9);}
     <fieldset>
       <legend>Air traffic — OpenSky Network</legend>
       <div class="row">
+        <label for="air-provider">Data source</label>
+        <select id="air-provider">
+          <option value="adsblol">adsb.lol — no key, no relay (recommended)</option>
+          <option value="adsbfi">adsb.fi — no key, no relay (alternative)</option>
+          <option value="opensky">OpenSky Network — requires the relay below</option>
+        </select>
+        <span class="hint" id="air-provider-hint"></span>
+      </div>
+
+      <div class="opensky-only">
+      <div class="row">
         <label for="os-json">Import credentials.json</label>
         <textarea id="os-json" rows="3" spellcheck="false" autocomplete="off"
           placeholder='Paste the whole file, e.g. {"clientId":"…","clientSecret":"…"}'></textarea>
@@ -460,19 +472,23 @@ html[data-theme="light"] .veh .body{stroke:rgba(255,255,255,.9);}
         <label for="os-secret">OAuth2 client secret</label>
         <input id="os-secret" type="password" autocomplete="off" spellcheck="false" placeholder="client secret">
       </div>
+      </div>
+
       <div class="row">
         <label for="os-interval">Polling interval (seconds)</label>
         <input id="os-interval" type="number" min="5" max="600" step="1" value="15">
         <span class="hint">Minimum 5 s. Automatic back-off doubles this on HTTP 429 until the limit clears.</span>
       </div>
+      <!-- interval and enable apply to every provider -->
       <div class="row check">
         <input id="os-bbox" type="checkbox" checked>
-        <label for="os-bbox">Restrict requests to the current map view<br><span class="hint">Strongly recommended — a bounding box costs far fewer daily credits than a global request.</span></label>
+        <label for="os-bbox">Restrict requests to the current map view<br><span class="hint">Recommended. adsb.lol and adsb.fi always query around the map centre; this setting only affects OpenSky.</span></label>
       </div>
       <div class="row check">
         <input id="os-enabled" type="checkbox" checked>
         <label for="os-enabled">Air feed enabled</label>
       </div>
+      <div class="opensky-only">
       <div class="row" style="border:1px solid var(--ih-accent);border-radius:var(--r);padding:12px;background:var(--ih-surface-alt);">
         <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
           <label for="os-proxy" style="margin:0;">Relay URL (Cloudflare Worker) — required</label>
@@ -484,7 +500,8 @@ html[data-theme="light"] .veh .body{stroke:rgba(255,255,255,.9);}
           <button class="btn accent" id="btn-relay-test">Test relay now</button>
           <button class="btn" id="btn-relay-clear">Clear</button>
         </div>
-        <span class="hint" id="relay-msg">Paste the Worker URL. The <code>/?url=</code> suffix is added automatically if you leave it off. Nothing else on this page will make the air feed work.</span>
+        <span class="hint" id="relay-msg">Paste the Worker URL. The <code>/?url=</code> suffix is added automatically if you leave it off.</span>
+      </div>
       </div>
     </fieldset>
 
@@ -543,7 +560,7 @@ html[data-theme="light"] .veh .body{stroke:rgba(255,255,255,.9);}
 
     <div class="callout">
       <strong>Data attribution</strong>
-      Air traffic: OpenSky Network state vectors, CC BY-SA 4.0 for research/non-commercial use. Marine traffic: AISStream.io relay of terrestrial AIS receivers — coverage is coastal and incomplete. Basemaps © OpenStreetMap contributors, © CARTO, and Esri/Maxar as attributed on the map.
+      Air traffic: OpenSky Network state vectors (CC BY-SA 4.0, research/non-commercial), or adsb.lol / adsb.fi community ADS-B aggregators, depending on the selected source. Marine traffic: AISStream.io relay of terrestrial AIS receivers — coverage is coastal and incomplete. Basemaps © OpenStreetMap contributors, © CARTO, and Esri/Maxar as attributed on the map.
     </div>
   </div>
 </div>
@@ -565,7 +582,7 @@ html[data-theme="light"] .veh .body{stroke:rgba(255,255,255,.9);}
    ------------------------------------------------------------------------- */
 /* Build identity. Bump APP_VERSION on every deploy so the running page can be
    distinguished from a cached one. */
-const APP_VERSION = '1.5.0';
+const APP_VERSION = '1.6.0';
 const APP_BUILD   = '2026-08-01';
 
 const $  = (s, r = document) => r.querySelector(s);
@@ -595,6 +612,7 @@ const Store = (() => {
 const KEY = 'stm.settings.v1';
 const DEFAULTS = {
   osId: '', osSecret: '', osInterval: 15, osBbox: true, osEnabled: true, osProxy: '',
+  airProvider: 'adsblol',
   aisKey: '', aisViewport: true, aisEnabled: false,
   cap: 900, stale: 180, trail: 240, demo: false,
   theme: 'dark', sidebar: true, basemap: 'Dark Matter'
@@ -818,6 +836,62 @@ function pruneStale() {
    Anonymous access still works but is severely rate-limited. Authenticated
    access uses the OAuth2 client-credentials flow (basic auth was retired).
    ------------------------------------------------------------------------- */
+/* Community ADS-B aggregators. Both are keyless, send permissive CORS headers,
+   and therefore need no relay. Endpoint shape is a point-and-radius query
+   returning { ac: [...] }. */
+const ADSB_PROVIDERS = {
+  adsblol: { label: 'adsb.lol', url: (la, lo, d) => 'https://api.adsb.lol/v2/lat/' + la + '/lon/' + lo + '/dist/' + d },
+  adsbfi:  { label: 'adsb.fi',  url: (la, lo, d) => 'https://opendata.adsb.fi/api/v3/lat/' + la + '/lon/' + lo + '/dist/' + d }
+};
+
+// ADS-B emitter category strings map onto the same buckets as OpenSky's numeric ones.
+const ADSB_CAT = {
+  A1: 2, A2: 3, A3: 4, A4: 5, A5: 6, A6: 7, A7: 8,
+  B1: 9, B2: 10, B3: 11, B4: 12, B6: 14, B7: 15,
+  C1: 16, C2: 17
+};
+
+function ingestAdsb(json) {
+  const list = json.ac || json.aircraft || [];
+  const now = nowSec();
+  let kept = 0;
+  list.forEach(a => {
+    const lat = Number(a.lat), lon = Number(a.lon);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+    const onGround = a.alt_baro === 'ground';
+    const altFt = onGround ? null
+      : (Number.isFinite(a.alt_geom) ? Number(a.alt_geom)
+      : (Number.isFinite(a.alt_baro) ? Number(a.alt_baro) : null));
+    const rec = {
+      id: 'A:' + String(a.hex || '').trim(),
+      domain: 'air',
+      name: (a.flight || '').trim() || (a.r || '').trim() || String(a.hex || '').toUpperCase(),
+      origin: 'Unknown',
+      dest: null,
+      cat: ADSB_CAT[a.category] != null ? ADSB_CAT[a.category] : null,
+      onGround,
+      lat, lon,
+      hdg: Number.isFinite(a.track) ? Number(a.track) : (Number.isFinite(a.true_heading) ? Number(a.true_heading) : 0),
+      sogKn: Number.isFinite(a.gs) ? Number(a.gs) : null,
+      altFt,
+      ts: Number.isFinite(a.seen_pos) ? now - Number(a.seen_pos) : now,
+      demo: false,
+      meta: {
+        icao24: a.hex, squawk: a.squawk || null,
+        vrate: Number.isFinite(a.baro_rate) ? Number(a.baro_rate) / 196.85 : null,
+        reg: (a.r || '').trim() || null,
+        acType: (a.t || '').trim() || null,
+        src: 'ADS-B'
+      }
+    };
+    // Aircraft type is far more useful than a broad category when present.
+    rec.sub = rec.meta.acType ? rec.meta.acType : airSubtype(rec);
+    rec.colour = airColour(rec);
+    upsert(rec); kept++;
+  });
+  return kept;
+}
+
 const OpenSky = (() => {
   const TOKEN_URL = 'https://auth.opensky-network.org/auth/realms/opensky-network/protocol/openid-connect/token';
   const API_URL   = 'https://opensky-network.org/api/states/all';
@@ -890,6 +964,35 @@ const OpenSky = (() => {
     return kept;
   }
 
+  /* Radius in nautical miles from the map centre out to the furthest visible
+     corner, so the query covers at least what the user can see. */
+  function viewRadiusNm() {
+    const c = map.getCenter(), b = map.getBounds();
+    const m = Math.max(c.distanceTo(b.getNorthEast()), c.distanceTo(b.getSouthWest()));
+    return clamp(Math.ceil(m / 1852), 5, 250);
+  }
+
+  async function pollAdsb(provider) {
+    const c = map.getCenter();
+    const d = viewRadiusNm();
+    const url = provider.url(c.lat.toFixed(4), c.lng.toFixed(4), d);
+    const res = await fetch(url, { cache: 'no-store' });
+    if (!res.ok) {
+      Log.add('air', provider.label + ' returned HTTP ' + res.status + ' ' + res.statusText +
+        (res.status === 429 ? ' — rate limited, widen the polling interval.' : ''));
+      throw new Error('HTTP ' + res.status);
+    }
+    const json = await res.json();
+    const kept = ingestAdsb(json);
+    const total = (json.ac || []).length;
+    Log.add('air', provider.label + ': ' + total + ' aircraft within ' + d + ' nm of the map centre, ' +
+      kept + ' with valid positions.');
+    if (!kept) Log.add('air', 'No aircraft in range. Pan to a busier area or zoom out before concluding the source is broken.');
+    setStatus('#st-air', 'ok', 'AIR ' + kept + ' · ' + provider.label);
+    Dash.refresh();
+    if (d >= 250) Log.add('air', 'View exceeds the 250 nm query limit; only aircraft within 250 nm of centre are returned.');
+  }
+
   async function poll(force) {
     if (inflight || !S.osEnabled) return;
     // A failing request returns almost instantly, so map panning could otherwise
@@ -898,6 +1001,24 @@ const OpenSky = (() => {
     lastAttempt = Date.now();
     inflight = true;
     setStatus('#st-air', 'warn', 'AIR polling');
+
+    const adsb = ADSB_PROVIDERS[S.airProvider];
+    if (adsb) {
+      try {
+        await pollAdsb(adsb);
+        backoff = 1;
+      } catch (e) {
+        setStatus('#st-air', 'err', 'AIR error');
+        Log.add('air', adsb.label + ' request failed: ' + e.message +
+          (e instanceof TypeError ? ' (network/CORS — try the other keyless source in Settings)' : ''));
+        backoff = clamp(backoff * 2, 1, 16);
+      } finally {
+        inflight = false;
+        schedule();
+      }
+      return;
+    }
+
     try {
       const headers = {};
       let auth = relayAuthenticates();
@@ -1609,6 +1730,38 @@ async function runDiagnostics() {
   Log.add('diag', 'Map view: SW ' + b.getSouth().toFixed(3) + ',' + b.getWest().toFixed(3) +
                   ' → NE ' + b.getNorth().toFixed(3) + ',' + b.getEast().toFixed(3) + ' at zoom ' + map.getZoom());
 
+  Log.add('diag', 'Air source selected: ' + (ADSB_PROVIDERS[S.airProvider] ? ADSB_PROVIDERS[S.airProvider].label : 'OpenSky Network'));
+
+  // Step 0 — the keyless aggregators, tested over Zurich.
+  for (const key of Object.keys(ADSB_PROVIDERS)) {
+    const prov = ADSB_PROVIDERS[key];
+    try {
+      const t0 = performance.now();
+      const r = await fetch(prov.url('47.45', '8.55', '100'), { cache: 'no-store' });
+      const ms = Math.round(performance.now() - t0);
+      if (r.ok) {
+        const j = await r.json();
+        Log.add('diag', 'STEP 0 ' + prov.label + ': OK, HTTP ' + r.status + ', ' + ((j.ac || []).length) +
+          ' aircraft near Zurich, ' + ms + ' ms. This source needs no relay — select it as the air source.');
+      } else {
+        Log.add('diag', 'STEP 0 ' + prov.label + ': HTTP ' + r.status + ' ' + r.statusText + '.');
+      }
+    } catch (e) {
+      Log.add('diag', 'STEP 0 ' + prov.label + ': FAILED (' + e.message + ').' +
+        (e instanceof TypeError ? ' Blocked before leaving the browser — an extension or network filter is the likely cause, since this endpoint sends open CORS headers.' : ''));
+    }
+  }
+
+  if (S.airProvider !== 'opensky') {
+    Log.add('diag', 'OpenSky steps skipped — not the selected source. Switch the data source to OpenSky if you want them run.');
+    Log.add('diag', 'STEP 3 marine: key ' + (S.aisKey ? 'present (' + S.aisKey.length + ' chars)' : 'NOT SET') +
+      ' · feed ' + (S.aisEnabled ? 'enabled' : 'DISABLED') +
+      ' · subscription ' + (S.aisViewport ? 'current view' : 'global'));
+    Log.add('diag', '--- diagnostics end ---');
+    btn.disabled = false; btn.textContent = 'Run diagnostics';
+    return;
+  }
+
   // Step 1 — plain anonymous request, no bbox, no auth.
   try {
     const t0 = performance.now();
@@ -1831,11 +1984,34 @@ function bindChrome() {
   $('#btn-diag').addEventListener('click', runDiagnostics);
   $('#btn-json-import').addEventListener('click', () => importCredentials($('#os-json').value));
 
+  const provSel = $('#air-provider');
+  const PROV_HINT = {
+    adsblol: 'Community ADS-B aggregator. No key, no relay, permissive CORS. Queries a radius around the map centre, capped at 250 nm.',
+    adsbfi:  'Alternative community aggregator with the same query shape. Try this if adsb.lol is rate-limiting.',
+    opensky: 'Requires a working relay — OpenSky sends no usable CORS header to a browser, and its hosts have been timing out from Cloudflare.'
+  };
+  function applyProvider() {
+    const p = S.airProvider || 'adsblol';
+    provSel.value = p;
+    $('#air-provider-hint').textContent = PROV_HINT[p] || '';
+    $$('.opensky-only').forEach(el => { el.hidden = (p !== 'opensky'); });
+  }
+  provSel.addEventListener('change', () => {
+    S.airProvider = provSel.value; saveSettings();
+    applyProvider();
+    targets.forEach((t, id) => { if (t.domain === 'air') targets.delete(id); });
+    render(); Dash.refresh();
+    Log.add('air', 'Switched air source to ' + (ADSB_PROVIDERS[S.airProvider] ? ADSB_PROVIDERS[S.airProvider].label : 'OpenSky Network') + '.');
+    OpenSky.reset();
+  });
+  applyProvider();
+
   const relayInput = $('#os-proxy');
   relayInput.value = S.osProxy || '';
   const relaySync = () => {
     S.osProxy = normaliseRelay(relayInput.value); saveSettings();
-    setRelayState(S.osProxy ? 'warn' : 'err', S.osProxy ? 'saved, untested' : 'not set',
+    $('#air-provider').value = S.airProvider || 'adsblol';
+  setRelayState(S.osProxy ? 'warn' : 'err', S.osProxy ? 'saved, untested' : 'not set',
       S.osProxy ? 'Stored as ' + S.osProxy + ' — press "Test relay now" to confirm it works.' : null);
   };
   relayInput.addEventListener('input', relaySync);
